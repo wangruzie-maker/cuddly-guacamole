@@ -1,0 +1,2034 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小红书笔记提取</title>
+  <style>
+    :root {
+      --bg: #f4f8ff;
+      --panel: #ffffff;
+      --panel-2: #f3f7ff;
+      --border: #d9e6ff;
+      --text: #183052;
+      --muted: #6b84ab;
+      --accent: #2f7bff;
+      --accent-2: #67a2ff;
+      --ok: #22b07d;
+      --err: #eb5757;
+      --shadow: 0 14px 34px rgba(40, 96, 180, 0.12);
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(1100px 520px at 0% -10%, rgba(47, 123, 255, 0.12), transparent 60%),
+        radial-gradient(900px 480px at 100% 0%, rgba(103, 162, 255, 0.12), transparent 58%),
+        var(--bg);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent), #ff8a65);
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      box-shadow: var(--shadow);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.45rem;
+      letter-spacing: 0.02em;
+    }
+
+    .sub {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .badge {
+      padding: 6px 12px;
+      border: 1px solid rgba(47, 123, 255, 0.35);
+      color: var(--accent);
+      background: rgba(47, 123, 255, 0.08);
+      border-radius: 999px;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+
+    .platform-tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .platform-tab {
+      padding: 8px 18px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+
+    .platform-tab.active[data-platform="xhs"] {
+      border-color: rgba(47, 123, 255, 0.45);
+      background: rgba(47, 123, 255, 0.14);
+    }
+
+    .platform-tab.active[data-platform="channels"] {
+      border-color: rgba(47, 123, 255, 0.45);
+      background: rgba(47, 123, 255, 0.14);
+    }
+
+    .platform-tab.active[data-platform="intel"] {
+      border-color: rgba(47, 123, 255, 0.45);
+      background: rgba(47, 123, 255, 0.14);
+    }
+
+    #channelsApp[hidden] { display: none !important; }
+    #intelApp[hidden] { display: none !important; }
+
+    .discover-box {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px dashed var(--border);
+      background: rgba(47, 123, 255, 0.05);
+    }
+
+    .discover-box h4 {
+      margin: 0 0 8px;
+      font-size: 0.92rem;
+    }
+
+    .discover-filters {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin: 8px 0;
+    }
+
+    .discover-filters select,
+    .discover-filters input {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel-2);
+      color: var(--text);
+      font-size: 0.88rem;
+    }
+
+    .discover-filters .full-row {
+      grid-column: 1 / -1;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    @media (max-width: 960px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: rgba(255, 255, 255, 0.95);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+    }
+
+    .panel-head {
+      padding: 16px 18px 0;
+      font-weight: 600;
+    }
+
+    .panel-body { padding: 14px 18px 18px; }
+
+    textarea {
+      width: 100%;
+      min-height: 220px;
+      resize: vertical;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 14px;
+      font-size: 0.95rem;
+      line-height: 1.55;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    textarea:focus { border-color: rgba(47, 123, 255, 0.55); }
+
+    .hint {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.5;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.12s ease, opacity 0.12s ease;
+    }
+
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: white;
+      box-shadow: 0 10px 24px rgba(47, 123, 255, 0.24);
+    }
+    .return-panel {
+      margin-bottom: 18px;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, #ffffff, #f6f9ff);
+      box-shadow: var(--shadow);
+    }
+    .return-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .return-title {
+      margin: 0;
+      font-size: 0.95rem;
+      color: var(--muted);
+    }
+    .return-platform {
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .return-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .return-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+      min-height: 78px;
+    }
+    .return-label {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-bottom: 6px;
+    }
+    .return-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--text);
+    }
+    .return-sub {
+      margin-top: 4px;
+      font-size: 0.76rem;
+      color: var(--muted);
+    }
+    @media (max-width: 960px) {
+      .return-grid {
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+      }
+    }
+
+    .btn-secondary {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .stats {
+      display: flex;
+      gap: 10px;
+      flex-wrap: nowrap;
+      margin-bottom: 12px;
+      flex: 1 1 auto;
+      min-width: 0;
+      align-items: stretch;
+    }
+
+    .stat {
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      font-size: 0.86rem;
+      color: var(--muted);
+      white-space: nowrap;
+      flex: 0 0 auto;
+    }
+
+    .stat.stat-wide {
+      flex: 1 1 0;
+      min-width: 12rem;
+      white-space: normal;
+    }
+
+    .stat.stat-pending {
+      min-width: 14rem;
+    }
+
+    .result-toolbar {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 14px 16px 0;
+      flex-wrap: wrap;
+    }
+
+    .result-toolbar .stats {
+      margin-bottom: 0;
+    }
+
+    .stat strong { color: var(--text); }
+
+    .empty {
+      padding: 48px 20px;
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .cards { display: grid; gap: 14px; }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--panel-2);
+      overflow: hidden;
+    }
+
+    .card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      align-items: flex-start;
+    }
+
+    .card-title {
+      margin: 0;
+      font-size: 1.02rem;
+      line-height: 1.45;
+    }
+
+    .tag {
+      font-size: 0.75rem;
+      padding: 4px 8px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .tag.ok { background: rgba(62, 207, 142, 0.15); color: var(--ok); }
+    .tag.err { background: rgba(255, 107, 107, 0.15); color: var(--err); }
+    .tag.type { background: rgba(47, 123, 255, 0.12); color: var(--accent); }
+
+    .card-body { padding: 14px 16px 16px; }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      color: #4a6288;
+      font-size: 0.84rem;
+      margin-bottom: 10px;
+    }
+
+    .desc {
+      white-space: pre-wrap;
+      line-height: 1.65;
+      font-size: 0.94rem;
+      color: var(--text);
+      margin: 0 0 12px;
+    }
+
+    .images {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .images img {
+      width: 88px;
+      height: 88px;
+      object-fit: cover;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #111;
+    }
+
+    .error-box {
+      color: var(--err);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    .link-row {
+      margin-top: 10px;
+      font-size: 0.84rem;
+      color: #4a6288;
+      word-break: break-all;
+    }
+
+    .link-row a {
+      color: var(--accent);
+    }
+
+    .loading {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin-top: 10px;
+    }
+
+    .loading.show { display: flex; }
+
+    .task-panel {
+      display: block;
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(47, 123, 255, 0.04);
+    }
+
+    .task-panel.idle {
+      opacity: 0.72;
+    }
+
+    .task-panel.idle .task-bar-fill {
+      width: 0 !important;
+    }
+
+    .task-panel.active {
+      border-color: rgba(255, 36, 66, 0.35);
+      background: rgba(255, 36, 66, 0.06);
+    }
+
+    .task-panel.done {
+      border-color: rgba(46, 204, 113, 0.35);
+      background: rgba(46, 204, 113, 0.06);
+    }
+
+    .task-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.88rem;
+      margin-bottom: 8px;
+    }
+
+    .task-head strong { color: var(--text); }
+
+    .task-bar {
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+
+    .task-bar-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #ff2442, #ff6b6b);
+      transition: width 0.35s ease;
+    }
+
+    .task-label {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.45;
+      word-break: break-all;
+      min-height: 1.2em;
+      margin-bottom: 10px;
+    }
+
+    .task-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .task-actions button {
+      padding: 6px 12px;
+      font-size: 0.82rem;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.15);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.86rem;
+      display: none;
+    }
+
+    table.show { display: table; }
+
+    th, td {
+      border-bottom: 1px solid var(--border);
+      padding: 10px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { color: var(--muted); font-weight: 600; }
+
+    .view-toggle {
+      display: flex;
+      gap: 8px;
+      margin-left: auto;
+    }
+
+    .view-toggle button.active {
+      border-color: rgba(255, 36, 66, 0.5);
+      color: #ffb3be;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .checkbox-row input { accent-color: var(--accent); }
+
+    .script-box {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(47, 123, 255, 0.06);
+      border: 1px solid rgba(47, 123, 255, 0.2);
+    }
+
+    .script-label {
+      font-size: 0.78rem;
+      color: var(--accent);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .script-text {
+      white-space: pre-wrap;
+      line-height: 1.6;
+      font-size: 0.9rem;
+      color: var(--text);
+      margin: 0;
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .btn-danger {
+      background: rgba(235, 87, 87, 0.1);
+      color: #c0392b;
+      border: 1px solid rgba(235, 87, 87, 0.25);
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      background: #ffffff;
+      border: 1px solid var(--border);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all 0.2s ease;
+      pointer-events: none;
+      z-index: 20;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .history-panel {
+      margin-top: 18px;
+    }
+
+    .history-list {
+      list-style: none;
+      margin: 10px 0 0;
+      padding: 0;
+      max-height: 220px;
+      overflow-y: auto;
+      display: grid;
+      gap: 8px;
+    }
+
+    .history-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+    }
+
+    .history-item-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .history-name {
+      font-weight: 600;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+
+    .history-meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .history-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .history-actions button {
+      padding: 6px 10px;
+      font-size: 0.78rem;
+    }
+
+    .btn-small {
+      padding: 6px 10px !important;
+      font-size: 0.78rem !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="logo" id="brandLogo">红</div>
+        <div>
+          <h1 id="appTitle">社媒内容提取</h1>
+          <p class="sub" id="appSubtitle">小红书 · 关键词/账号发现 + 链接提取</p>
+        </div>
+      </div>
+      <div class="badge" id="versionBadge">v1.9.2</div>
+    </header>
+
+    <nav class="platform-tabs" id="platformTabs">
+      <button type="button" class="platform-tab active" data-platform="xhs">小红书</button>
+      <button type="button" class="platform-tab" data-platform="channels">视频号</button>
+      <button type="button" class="platform-tab" data-platform="intel">内容情报</button>
+    </nav>
+
+    <section class="return-panel" id="returnPanel">
+      <div class="return-head">
+        <p class="return-title">数据分析 / 数据回传总览</p>
+        <span class="return-platform" id="returnPlatform">小红书</span>
+      </div>
+      <div class="return-grid">
+        <div class="return-card">
+          <div class="return-label">累计内容</div>
+          <div class="return-value" id="returnTotal">0</div>
+          <div class="return-sub">当前平台累计条目</div>
+        </div>
+        <div class="return-card">
+          <div class="return-label">成功数</div>
+          <div class="return-value" id="returnSuccess">0</div>
+          <div class="return-sub">提取成功条目</div>
+        </div>
+        <div class="return-card">
+          <div class="return-label">成功率</div>
+          <div class="return-value" id="returnRate">0.0%</div>
+          <div class="return-sub">成功 / 累计</div>
+        </div>
+        <div class="return-card">
+          <div class="return-label">处理中</div>
+          <div class="return-value" id="returnPending">0</div>
+          <div class="return-sub">OCR/转写/缓存等任务</div>
+        </div>
+        <div class="return-card">
+          <div class="return-label">异常/失败</div>
+          <div class="return-value" id="returnFailed">0</div>
+          <div class="return-sub">待复盘问题数</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="return-panel" id="monitorPanel">
+      <div class="return-head">
+        <p class="return-title">批量监测 / 链接回查（查询是否已转录）</p>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+        <select id="monitorPlatform" style="padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:var(--panel);color:var(--text);">
+          <option value="all">全部平台</option>
+          <option value="xhs">小红书</option>
+          <option value="channels">视频号</option>
+        </select>
+        <button class="btn-secondary" id="monitorQueryBtn">批量查询</button>
+        <span class="hint" id="monitorSummary" style="margin:0">粘贴多条链接后可回查历史脚本状态</span>
+      </div>
+      <textarea id="monitorInput" rows="4" style="min-height:110px;" placeholder="每行一个链接，支持混合小红书 / 视频号"></textarea>
+      <div style="overflow:auto;margin-top:10px;">
+        <table id="monitorTable" class="show">
+          <thead>
+            <tr>
+              <th>查询链接</th>
+              <th>平台</th>
+              <th>状态</th>
+              <th>转录状态</th>
+              <th>点赞</th>
+              <th>收藏</th>
+              <th>评论</th>
+              <th>分享</th>
+              <th>标题</th>
+              <th>脚本预览</th>
+              <th>提取时间</th>
+            </tr>
+          </thead>
+          <tbody id="monitorTableBody">
+            <tr><td colspan="11" class="hint">暂无查询结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div id="xhsApp">
+    <div class="grid">
+      <section class="panel">
+        <div class="panel-head">输入链接</div>
+        <div class="panel-body">
+          <textarea id="input" placeholder="粘贴小红书分享链接，支持多行&#10;&#10;示例：&#10;67 【标题】 😆 abc 😆 https://xhslink.com/m/xxxx 😆&#10;或直接粘贴 https://www.xiaohongshu.com/explore/...?xsec_token=..."></textarea>
+          <p class="hint">请使用 APP「复制链接」得到的完整分享链（含 xsec_token）。结果会自动累积，无需每次导出。</p>
+          <label class="checkbox-row">
+            <input type="checkbox" id="ocrImages" />
+            提取图片内文字（OCR，后台处理）
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="cacheImages" checked />
+            下载图片素材（导出 Excel 时嵌入表格）
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="transcribeVideo" checked />
+            提取视频口播脚本（语音识别，后台处理，发现/爬虫默认开启）
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="longVideo" checked />
+            完整转录长视频（几十分钟不截断，耗时更长）
+          </label>
+          <label class="checkbox-row" style="align-items:center;gap:8px">
+            <span style="min-width:88px">识别模型</span>
+            <select id="whisperModel" style="flex:1;padding:8px;border-radius:8px;border:1px solid var(--border);background:var(--panel-2);color:var(--text)">
+              <option value="tiny">tiny · 最快，准确度一般</option>
+              <option value="base">base · 较快</option>
+              <option value="small" selected>small · 推荐（速度与准确度平衡）</option>
+              <option value="medium">medium · 更准，较慢</option>
+              <option value="large-v3">large-v3 · 最准，很慢</option>
+            </select>
+          </label>
+          <div class="actions">
+            <button class="btn-primary" id="extractBtn">提取并累积</button>
+            <button class="btn-secondary" id="clearInputBtn">清空输入</button>
+          </div>
+          <div class="loading" id="loading"><span class="spinner"></span><span id="loadingText">正在提取，请稍候…</span></div>
+
+          <div class="task-panel idle" id="taskPanel">
+            <div class="task-head">
+              <strong id="taskPhase">任务进度</strong>
+              <span id="taskCounts">待命</span>
+            </div>
+            <div class="task-bar"><div class="task-bar-fill" id="taskBarFill"></div></div>
+            <div class="task-label" id="taskLabel">点击「提取并累积」后，这里会显示进度，可暂停或取消</div>
+            <div class="task-actions">
+              <button class="btn-secondary btn-small" id="taskPauseBtn">暂停</button>
+              <button class="btn-secondary btn-small" id="taskResumeBtn" style="display:none">继续</button>
+              <button class="btn-danger btn-secondary btn-small" id="taskCancelBtn">取消任务</button>
+            </div>
+          </div>
+
+          <div class="discover-box">
+            <h4>关键词 / 账号发现</h4>
+            <p class="hint" style="margin-top:0">搜索关键词或抓取指定账号/竞品主页笔记 → 一键转入提取（小红书需 CDP 登录）</p>
+            <select id="xhsDiscoverSource" style="width:100%;margin:8px 0;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--panel-2);color:var(--text)"></select>
+            <input type="text" id="xhsDiscoverKeyword" placeholder="搜索关键词 / 账号昵称" style="width:100%;margin:0 0 8px;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--panel-2);color:var(--text)" />
+            <input type="text" id="xhsDiscoverProfile" placeholder="主页链接（账号模式）https://www.xiaohongshu.com/user/profile/..." style="width:100%;margin:0 0 8px;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--panel-2);color:var(--text);display:none" />
+            <input type="number" id="xhsDiscoverLimit" min="1" max="50" value="20" placeholder="抓取数量（1–50）" title="链接数量" style="width:100%;margin:0 0 8px;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--panel-2);color:var(--text)" />
+            <div id="xhsDiscoverFilters" class="discover-filters">
+              <select id="xhsDiscoverSort">
+                <option value="">排序 · 综合</option>
+                <option value="最新">排序 · 最新</option>
+                <option value="最多点赞">排序 · 最多点赞</option>
+                <option value="最多评论">排序 · 最多评论</option>
+                <option value="最多收藏">排序 · 最多收藏</option>
+              </select>
+              <select id="xhsDiscoverNoteType">
+                <option value="">类型 · 不限</option>
+                <option value="视频">类型 · 视频</option>
+                <option value="图文">类型 · 图文</option>
+              </select>
+              <input type="number" id="xhsDiscoverMinLiked" min="0" placeholder="最低点赞" />
+              <input type="number" id="xhsDiscoverMinCollected" min="0" placeholder="最低收藏" />
+              <input type="number" id="xhsDiscoverMinComments" min="0" placeholder="最低评论" />
+              <input type="number" id="xhsDiscoverMinViews" min="0" placeholder="最低浏览（若返回）" />
+              <p class="hint full-row" style="margin:0">筛选适用于关键词搜索；PC 搜索接口通常不含浏览量，账号主页抓取无互动数据</p>
+            </div>
+            <div class="actions">
+              <button class="btn-secondary btn-small" id="xhsLoginBtn">一键登录小红书（CDP）</button>
+              <button class="btn-secondary btn-small" id="xhsDiscoverBtn">发现链接</button>
+              <button class="btn-secondary btn-small" id="xhsDiscoverExtractBtn">发现并提取</button>
+            </div>
+            <div id="xhsDiscoverMsg" class="hint" style="margin-top:8px"></div>
+            <ul id="xhsDiscoverList" class="history-list" style="margin-top:8px"></ul>
+          </div>
+
+          <div class="history-panel panel" style="box-shadow:none;border-radius:12px;">
+            <div class="panel-head">历史存档</div>
+            <div class="panel-body" style="padding-top:10px;">
+              <p class="hint" style="margin-top:0">将当前列表存档后可随时恢复；清空当前列表时也可选择先存档。</p>
+              <div class="actions" style="margin-top:8px;">
+                <button class="btn-secondary btn-small" id="saveHistoryBtn">存档当前列表</button>
+                <button class="btn-secondary btn-small" id="supplementOcrAllBtn">全部补充 OCR</button>
+                <button class="btn-secondary btn-small" id="supplementTranscribeAllBtn">全部补转写视频</button>
+              </div>
+              <ul class="history-list" id="historyList">
+                <li class="history-meta">暂无历史存档</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="result-toolbar">
+          <div class="stats" id="stats"></div>
+          <div class="view-toggle">
+            <button class="btn-secondary active" id="cardViewBtn">卡片</button>
+            <button class="btn-secondary" id="tableViewBtn">表格</button>
+          </div>
+          <button class="btn-secondary" id="exportCsvBtn" disabled>导出 CSV</button>
+          <button class="btn-secondary" id="exportExcelBtn" disabled>导出 Excel（含图片）</button>
+          <button class="btn-danger" id="clearAllBtn" disabled>清空当前列表</button>
+        </div>
+        <div class="panel-body">
+          <div id="cards" class="cards">
+            <div class="empty">提取结果会显示在这里</div>
+          </div>
+          <table id="table">
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>标题</th>
+                <th>类型</th>
+                <th>作者</th>
+                <th>文案摘要</th>
+                <th>图片OCR</th>
+                <th>视频脚本</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="tableBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    </div>
+
+    <div id="channelsApp" hidden></div>
+
+    <div id="intelApp" hidden></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const input = document.getElementById('input');
+    const extractBtn = document.getElementById('extractBtn');
+    const clearInputBtn = document.getElementById('clearInputBtn');
+    const clearAllBtn = document.getElementById('clearAllBtn');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const exportExcelBtn = document.getElementById('exportExcelBtn');
+    const ocrImages = document.getElementById('ocrImages');
+    const cacheImages = document.getElementById('cacheImages');
+    const longVideo = document.getElementById('longVideo');
+    const transcribeVideo = document.getElementById('transcribeVideo');
+    const whisperModel = document.getElementById('whisperModel');
+    const loading = document.getElementById('loading');
+    const loadingText = document.getElementById('loadingText');
+    const taskPanel = document.getElementById('taskPanel');
+    const taskPhase = document.getElementById('taskPhase');
+    const taskCounts = document.getElementById('taskCounts');
+    const taskBarFill = document.getElementById('taskBarFill');
+    const taskLabel = document.getElementById('taskLabel');
+    const taskPauseBtn = document.getElementById('taskPauseBtn');
+    const taskResumeBtn = document.getElementById('taskResumeBtn');
+    const taskCancelBtn = document.getElementById('taskCancelBtn');
+    const cards = document.getElementById('cards');
+    const table = document.getElementById('table');
+    const tableBody = document.getElementById('tableBody');
+    const stats = document.getElementById('stats');
+    const cardViewBtn = document.getElementById('cardViewBtn');
+    const tableViewBtn = document.getElementById('tableViewBtn');
+    const saveHistoryBtn = document.getElementById('saveHistoryBtn');
+    const supplementOcrAllBtn = document.getElementById('supplementOcrAllBtn');
+    const supplementTranscribeAllBtn = document.getElementById('supplementTranscribeAllBtn');
+    const historyList = document.getElementById('historyList');
+    const toast = document.getElementById('toast');
+    const monitorInput = document.getElementById('monitorInput');
+    const monitorPlatform = document.getElementById('monitorPlatform');
+    const monitorQueryBtn = document.getElementById('monitorQueryBtn');
+    const monitorSummary = document.getElementById('monitorSummary');
+    const monitorTableBody = document.getElementById('monitorTableBody');
+    const returnPlatform = document.getElementById('returnPlatform');
+    const returnTotal = document.getElementById('returnTotal');
+    const returnSuccess = document.getElementById('returnSuccess');
+    const returnRate = document.getElementById('returnRate');
+    const returnPending = document.getElementById('returnPending');
+    const returnFailed = document.getElementById('returnFailed');
+
+    let accumulatedResults = [];
+    let pollTimer = null;
+    let taskPollTimer = null;
+    let currentTaskId = null;
+    let currentPlatform = 'xhs';
+    const platformMetrics = {
+      xhs: { count: 0, success: 0, pending: 0, failed: 0, label: '小红书' },
+      channels: { count: 0, success: 0, pending: 0, failed: 0, label: '视频号' },
+    };
+
+    function updateReturnPanel() {
+      const m = platformMetrics[currentPlatform] || platformMetrics.xhs;
+      const rate = m.count ? `${((m.success / m.count) * 100).toFixed(1)}%` : '0.0%';
+      returnPlatform.textContent = m.label;
+      returnTotal.textContent = String(m.count || 0);
+      returnSuccess.textContent = String(m.success || 0);
+      returnRate.textContent = rate;
+      returnPending.textContent = String(m.pending || 0);
+      returnFailed.textContent = String(m.failed || 0);
+    }
+
+    function setPlatformMetrics(platform, payload) {
+      platformMetrics[platform] = {
+        count: payload.count || 0,
+        success: payload.success || 0,
+        pending: payload.pending || 0,
+        failed: payload.failed || 0,
+        label: platform === 'channels' ? '视频号' : '小红书',
+      };
+      if (currentPlatform === platform) updateReturnPanel();
+    }
+
+    window.updateReturnPanelData = function updateReturnPanelData(platform, data) {
+      const count = Number(data?.count || 0);
+      const success = Number(data?.success || 0);
+      const pending = Number(data?.pending_transcriptions || 0);
+      const failed = Math.max(0, count - success);
+      setPlatformMetrics(platform, { count, success, pending, failed });
+    };
+
+    function canSupplementOcr(r) {
+      return r.status === '成功' && (r.image_urls || []).length > 0;
+    }
+
+    function canSupplementTranscribe(r) {
+      return r.status === '成功' && r.note_type === '视频' && r.video_url;
+    }
+
+    const SCRIPT_SOURCE_LABEL = {
+      asr: '语音识别',
+      subtitle: '字幕',
+      chapters: '章节',
+      desc: '配文兜底',
+    };
+
+    function proxyImage(url) {
+      return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+    }
+
+    function setView(mode) {
+      const cardMode = mode === 'card';
+      cards.style.display = cardMode ? 'grid' : 'none';
+      table.classList.toggle('show', !cardMode);
+      cardViewBtn.classList.toggle('active', cardMode);
+      tableViewBtn.classList.toggle('active', !cardMode);
+    }
+
+    function showToast(message) {
+      toast.textContent = message;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2600);
+    }
+
+    function renderMonitorRows(items) {
+      if (!items.length) {
+        monitorTableBody.innerHTML = '<tr><td colspan="11" class="hint">暂无查询结果</td></tr>';
+        return;
+      }
+      monitorTableBody.innerHTML = items.map((row) => `
+        <tr>
+          <td>${escapeHtml((row.query_url || '').slice(0, 80))}</td>
+          <td>${row.platform === 'channels' ? '视频号' : row.platform === 'xhs' ? '小红书' : '-'}</td>
+          <td>${row.found ? escapeHtml(row.status || '已收录') : '未收录'}</td>
+          <td>${escapeHtml(row.video_script_status || '-')}</td>
+          <td>${escapeHtml(row.liked_count || '-')}</td>
+          <td>${escapeHtml(row.collected_count || '-')}</td>
+          <td>${escapeHtml(row.comment_count || '-')}</td>
+          <td>${escapeHtml(row.share_count || '-')}</td>
+          <td>${escapeHtml((row.title || '-').slice(0, 40))}</td>
+          <td>${escapeHtml((row.video_script_preview || '-').slice(0, 120))}</td>
+          <td>${escapeHtml(row.extracted_at || '-')}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function queryMonitorBatch() {
+      const text = monitorInput.value.trim();
+      if (!text) {
+        alert('请先粘贴要监测的链接');
+        return;
+      }
+      monitorQueryBtn.disabled = true;
+      monitorSummary.textContent = '查询中...';
+      try {
+        const resp = await fetch('/api/monitor/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            platform: monitorPlatform.value || 'all',
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          throw new Error(data.detail || '批量查询失败');
+        }
+        renderMonitorRows(data.items || []);
+        monitorSummary.textContent = `共 ${data.count || 0} 条，已收录 ${data.found || 0} 条，未收录 ${data.not_found || 0} 条`;
+      } catch (err) {
+        monitorSummary.textContent = err.message || String(err);
+      } finally {
+        monitorQueryBtn.disabled = false;
+      }
+    }
+
+    let whisperStatus = { model: 'small', ready: false, loaded: false };
+
+    async function refreshWhisperStatus(model) {
+      try {
+        const q = model ? `?model=${encodeURIComponent(model)}` : '';
+        const resp = await fetch(`/api/whisper/status${q}`);
+        if (resp.ok) whisperStatus = await resp.json();
+      } catch (_) {}
+      return whisperStatus;
+    }
+
+    function transcribePendingHint(r) {
+      const model = r.whisper_model || (whisperModel && whisperModel.value) || whisperStatus.model || 'small';
+      if (whisperStatus.loaded && whisperStatus.model === model) {
+        return `Whisper ${model} 已成功调用，正在转写口播…`;
+      }
+      if (whisperStatus.ready) {
+        return `Whisper ${model} 本地模型已就绪，正在调用识别…`;
+      }
+      return `Whisper ${model} 未检测到本地模型，请先运行 ./setup_whisper.sh`;
+    }
+
+    function totalPending(data) {
+      return (data.pending_transcriptions || 0)
+        + (data.pending_ocr || 0)
+        + (data.pending_image_cache || 0);
+    }
+
+    function renderStats(data, mergeInfo) {
+      const mergeText = mergeInfo
+        ? `新增 ${mergeInfo.added} / 更新 ${mergeInfo.updated}`
+        : '—';
+      const transcribe = data.pending_transcriptions || 0;
+      const ocr = data.pending_ocr || 0;
+      const cache = data.pending_image_cache || 0;
+      stats.innerHTML = `
+        <div class="stat">累积 <strong>${data.count}</strong> 条</div>
+        <div class="stat">成功 <strong>${data.success}</strong></div>
+        <div class="stat">失败 <strong>${data.count - data.success}</strong></div>
+        <div class="stat stat-wide">本次 ${mergeText}</div>
+        <div class="stat stat-pending">处理中 · 转写 <strong>${transcribe}</strong> · OCR <strong>${ocr}</strong> · 下图 <strong>${cache}</strong></div>
+      `;
+      exportCsvBtn.disabled = data.count === 0;
+      exportExcelBtn.disabled = data.count === 0;
+      clearAllBtn.disabled = data.count === 0;
+    }
+
+    function ocrBlock(r) {
+      if (r.image_ocr_status === 'pending') {
+        return `
+          <div class="script-box" style="border-color:rgba(47,123,255,0.25);background:rgba(47,123,255,0.05)">
+            <div class="script-label">图片 OCR · 识别中…</div>
+            <p class="script-text" style="color:#4a6288">正在后台下载图片并识别文字</p>
+          </div>
+        `;
+      }
+      if (!r.image_ocr_text) return '';
+      return `
+        <div class="script-box" style="border-color:rgba(47,123,255,0.25);background:rgba(47,123,255,0.05)">
+          <div class="script-label">图片 OCR</div>
+          <p class="script-text">${escapeHtml(r.image_ocr_text)}</p>
+        </div>
+      `;
+    }
+
+    function scriptBlock(r) {
+      if (r.video_script_status === 'pending') {
+        return `
+          <div class="script-box">
+            <div class="script-label">视频脚本 · 转写中…</div>
+            <p class="script-text" style="color:#4a6288">${escapeHtml(transcribePendingHint(r))}</p>
+          </div>
+        `;
+      }
+      if (!r.video_script) {
+        if (r.note_type === '视频' && r.video_url && r.video_script_status === 'failed') {
+          return `
+            <div class="script-box">
+              <div class="script-label">视频脚本 · 转写失败</div>
+              <p class="script-text" style="color:#4a6288">请点击「提取口播脚本」或「全部补转写视频」重试</p>
+            </div>
+          `;
+        }
+        if (r.note_type === '视频' && r.video_url && r.video_script_status !== 'pending') {
+          return `
+            <div class="script-box">
+              <div class="script-label">视频脚本 · 未生成</div>
+              <p class="script-text" style="color:#4a6288">可点击「提取口播脚本」进行语音识别转写</p>
+            </div>
+          `;
+        }
+        return '';
+      }
+      const label = SCRIPT_SOURCE_LABEL[r.video_script_source] || r.video_script_source || '脚本';
+      return `
+        <div class="script-box">
+          <div class="script-label">视频脚本 · ${escapeHtml(label)}</div>
+          <p class="script-text">${escapeHtml(r.video_script)}</p>
+        </div>
+      `;
+    }
+
+    function renderCards(results) {
+      if (!results.length) {
+        cards.innerHTML = '<div class="empty">还没有累积结果，提取后会自动保存在这里</div>';
+        return;
+      }
+
+      cards.innerHTML = results.map((r) => {
+        const ok = r.status === '成功';
+        const imgUrls = r.image_urls || [];
+        const imgs = imgUrls.slice(0, 20).map((u) =>
+          `<img src="${proxyImage(u)}" alt="img" loading="lazy" />`
+        ).join('');
+        const imgMore = imgUrls.length > 20 ? `<span class="tag type">+${imgUrls.length - 20} 张</span>` : '';
+        const imgCount = imgUrls.length ? `<span class="tag type">${imgUrls.length} 张图</span>` : '';
+
+        return `
+          <article class="card" data-feed-id="${escapeAttr(r.feed_id || '')}">
+            <div class="card-head">
+              <h3 class="card-title">${ok ? escapeHtml(r.title || '（无标题）') : escapeHtml(r.url)}</h3>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+                <span class="tag ${ok ? 'ok' : 'err'}">${r.status}</span>
+                ${r.note_type ? `<span class="tag type">${r.note_type}</span>` : ''}
+              </div>
+            </div>
+            <div class="card-body">
+              ${ok ? `
+                <div class="meta">
+                  <span>作者：${escapeHtml(r.author || '-')}</span>
+                  <span>赞 ${r.liked_count || '-'}</span>
+                  <span>藏 ${r.collected_count || '-'}</span>
+                  <span>评 ${r.comment_count || '-'}</span>
+                  ${r.extracted_at ? `<span>${escapeHtml(r.extracted_at)}</span>` : ''}
+                </div>
+                <p class="desc">${escapeHtml(r.desc || '')}</p>
+                ${ocrBlock(r)}
+                ${scriptBlock(r)}
+                ${r.video_url ? `<div class="link-row">视频：<a href="${escapeAttr(r.video_url)}" target="_blank" rel="noopener">${escapeHtml(r.video_url)}</a></div>` : ''}
+                ${imgCount || imgMore ? `<div style="margin-bottom:6px;display:flex;gap:6px;">${imgCount}${imgMore}</div>` : ''}
+                ${imgs ? `<div class="images">${imgs}</div>` : ''}
+              ` : `<div class="error-box">${escapeHtml(r.error || '提取失败')}</div>`}
+              <div class="link-row">${escapeHtml(r.url)}</div>
+              ${r.feed_id ? `
+                <div class="card-actions">
+                  ${canSupplementTranscribe(r) ? `
+                    <button class="btn-secondary btn-small" data-transcribe="${escapeAttr(r.feed_id)}" data-force="${r.video_script ? '1' : '0'}">
+                      ${r.video_script ? '重新转写' : '提取口播脚本'}
+                    </button>
+                  ` : ''}
+                  ${canSupplementOcr(r) ? `
+                    <button class="btn-secondary btn-small" data-ocr="${escapeAttr(r.feed_id)}" data-force="${r.image_ocr_text ? '1' : '0'}">
+                      ${r.image_ocr_text ? '重新 OCR' : '补充 OCR'}
+                    </button>
+                  ` : ''}
+                  <button class="btn-danger btn-secondary btn-small" data-remove="${escapeAttr(r.feed_id)}">移除</button>
+                </div>
+              ` : ''}
+            </div>
+          </article>
+        `;
+      }).join('');
+
+      cards.querySelectorAll('[data-remove]').forEach((btn) => {
+        btn.addEventListener('click', () => removeItem(btn.getAttribute('data-remove')));
+      });
+      cards.querySelectorAll('[data-ocr]').forEach((btn) => {
+        btn.addEventListener('click', () => supplementOcrOne(
+          btn.getAttribute('data-ocr'),
+          btn.getAttribute('data-force') === '1'
+        ));
+      });
+      cards.querySelectorAll('[data-transcribe]').forEach((btn) => {
+        btn.addEventListener('click', () => supplementTranscribeOne(
+          btn.getAttribute('data-transcribe'),
+          btn.getAttribute('data-force') === '1'
+        ));
+      });
+    }
+
+    function renderTable(results) {
+      tableBody.innerHTML = results.map((r) => `
+        <tr>
+          <td>${r.status}</td>
+          <td>${escapeHtml(r.title || '-')}</td>
+          <td>${r.note_type || '-'}</td>
+          <td>${escapeHtml(r.author || '-')}</td>
+          <td>${escapeHtml((r.desc || r.error || '').slice(0, 80))}</td>
+          <td>${escapeHtml((r.image_ocr_text || (r.image_ocr_status === 'pending' ? '识别中…' : '-')).slice(0, 60))}</td>
+          <td>${escapeHtml((r.video_script || (r.video_script_status === 'pending' ? '转写中…' : '-')).slice(0, 60))}</td>
+          <td>${r.feed_id ? `
+            ${canSupplementTranscribe(r) ? `<button class="btn-secondary btn-small" data-transcribe="${escapeAttr(r.feed_id)}" data-force="0">转写</button>` : ''}
+            <button class="btn-secondary btn-small" data-ocr="${escapeAttr(r.feed_id)}" data-force="0">OCR</button>
+            <button class="btn-danger btn-secondary btn-small" data-remove="${escapeAttr(r.feed_id)}">移除</button>
+          ` : '-'}</td>
+        </tr>
+      `).join('');
+
+      tableBody.querySelectorAll('[data-remove]').forEach((btn) => {
+        btn.addEventListener('click', () => removeItem(btn.getAttribute('data-remove')));
+      });
+      tableBody.querySelectorAll('[data-ocr]').forEach((btn) => {
+        btn.addEventListener('click', () => supplementOcrOne(btn.getAttribute('data-ocr'), false));
+      });
+      tableBody.querySelectorAll('[data-transcribe]').forEach((btn) => {
+        btn.addEventListener('click', () => supplementTranscribeOne(btn.getAttribute('data-transcribe'), false));
+      });
+    }
+
+    function renderAll(mergeInfo, meta) {
+      const data = {
+        count: accumulatedResults.length,
+        success: accumulatedResults.filter((r) => r.status === '成功').length,
+        pending_transcriptions: meta?.pending_transcriptions ?? accumulatedResults.filter(
+          (r) => r.video_script_status === 'pending'
+        ).length,
+        pending_ocr: meta?.pending_ocr ?? accumulatedResults.filter(
+          (r) => r.image_ocr_status === 'pending'
+        ).length,
+        pending_image_cache: meta?.pending_image_cache ?? accumulatedResults.filter(
+          (r) => r.image_cache_status === 'pending'
+        ).length,
+      };
+      setPlatformMetrics('xhs', {
+        count: data.count,
+        success: data.success,
+        pending: totalPending(data),
+        failed: Math.max(0, data.count - data.success),
+      });
+      renderStats(data, mergeInfo);
+      if (data.pending_transcriptions) {
+        const pendingModel = accumulatedResults.find((r) => r.video_script_status === 'pending')?.whisper_model;
+        refreshWhisperStatus(pendingModel).then(() => {
+          renderCards(accumulatedResults);
+          if (!cardMode) renderTable(accumulatedResults);
+        });
+      }
+      renderCards(accumulatedResults);
+      renderTable(accumulatedResults);
+      maybeStartPolling(data);
+    }
+
+    function stopTaskPolling() {
+      if (taskPollTimer) {
+        clearInterval(taskPollTimer);
+        taskPollTimer = null;
+      }
+    }
+
+    function phaseLabel(task) {
+      if (task.status === 'paused') return '已暂停';
+      if (task.phase === 'media') return '后台处理';
+      if (task.phase === 'extract') return '提取笔记';
+      return '任务';
+    }
+
+    function renderTaskPanel(task) {
+      taskPanel.classList.remove('idle', 'active', 'done');
+
+      if (!task) {
+        taskPanel.classList.add('idle');
+        taskPhase.textContent = '任务进度';
+        taskCounts.textContent = '待命';
+        taskBarFill.style.width = '0%';
+        taskLabel.textContent = '点击「提取并累积」后，这里会显示进度，可暂停或取消';
+        taskPauseBtn.style.display = 'none';
+        taskResumeBtn.style.display = 'none';
+        taskCancelBtn.style.display = 'none';
+        extractBtn.disabled = false;
+        currentTaskId = null;
+        return;
+      }
+
+      currentTaskId = task.id;
+      const running = task.status === 'running' || task.status === 'paused';
+      extractBtn.disabled = running;
+
+      if (running) {
+        taskPanel.classList.add('active');
+        loading.classList.remove('show');
+      } else if (task.status === 'completed') {
+        taskPanel.classList.add('done');
+      } else {
+        taskPanel.classList.add('idle');
+      }
+
+      const pct = task.progress_pct || 0;
+      taskPhase.textContent = phaseLabel(task);
+      taskCounts.textContent = `${task.overall_done || 0} / ${task.overall_total || task.extract_total || 0}`;
+      taskBarFill.style.width = `${Math.min(100, pct)}%`;
+
+      let detail = task.message || '';
+      if (task.phase === 'extract' && task.extract_total) {
+        detail = `笔记 ${task.extract_done}/${task.extract_total}`;
+      } else if (task.phase === 'media' && task.media_total) {
+        detail = `后台 ${task.media_done}/${task.media_total}`;
+      }
+      if (task.current_label) {
+        detail += detail ? ` · ${task.current_label}` : task.current_label;
+      }
+      taskLabel.textContent = detail;
+
+      const paused = task.status === 'paused';
+      taskPauseBtn.style.display = task.status === 'running' ? '' : 'none';
+      taskResumeBtn.style.display = paused ? '' : 'none';
+      taskCancelBtn.style.display = running ? '' : 'none';
+    }
+
+    async function refreshTaskStatus() {
+      const url = currentTaskId ? `/api/tasks/${encodeURIComponent(currentTaskId)}` : '/api/tasks/current';
+      const resp = await fetch(url);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const task = data.task;
+      if (data.accumulated) {
+        accumulatedResults = data.accumulated.results || [];
+        renderAll(task?.merge_stats ? { added: 0, updated: 0, total: data.accumulated.count } : null, data.accumulated);
+      }
+      renderTaskPanel(task);
+      return task;
+    }
+
+    function maybeStartTaskPolling(taskId) {
+      currentTaskId = taskId;
+      stopTaskPolling();
+      taskPollTimer = setInterval(async () => {
+        try {
+          const task = await refreshTaskStatus();
+          if (!task) {
+            stopTaskPolling();
+            return;
+          }
+            if (['completed', 'cancelled', 'failed'].includes(task.status)) {
+            stopTaskPolling();
+            extractBtn.disabled = false;
+            if (task.status === 'completed') {
+              showToast(task.message || '提取任务已完成');
+            } else if (task.status === 'cancelled') {
+              showToast('任务已取消');
+            } else {
+              showToast(task.message || '任务失败');
+            }
+            setTimeout(() => renderTaskPanel(null), 4000);
+            fetch('/api/accumulated')
+              .then((r) => r.json())
+              .then((acc) => maybeStartPolling(acc))
+              .catch(() => {});
+          }
+        } catch (_) {
+          stopTaskPolling();
+        }
+      }, 1000);
+    }
+
+    async function loadCurrentTask() {
+      try {
+        const resp = await fetch('/api/tasks/current');
+        const data = await resp.json();
+        if (!data.task) return;
+        renderTaskPanel(data.task);
+        if (data.accumulated) {
+          accumulatedResults = data.accumulated.results || [];
+          renderAll(null, data.accumulated);
+        }
+        if (data.task.status === 'running' || data.task.status === 'paused') {
+          maybeStartTaskPolling(data.task.id);
+        }
+      } catch (_) {}
+    }
+
+    async function pauseTaskAction() {
+      if (!currentTaskId) return;
+      const resp = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/pause`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.detail || '暂停失败');
+        return;
+      }
+      renderTaskPanel(data.task);
+      showToast('任务已暂停');
+    }
+
+    async function resumeTaskAction() {
+      if (!currentTaskId) return;
+      const resp = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/resume`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.detail || '继续失败');
+        return;
+      }
+      renderTaskPanel(data.task);
+      showToast('任务继续执行');
+    }
+
+    async function cancelTaskAction() {
+      if (!currentTaskId) return;
+      if (!confirm('确定取消当前提取任务？已完成的条目会保留。')) return;
+      const resp = await fetch(`/api/tasks/${encodeURIComponent(currentTaskId)}/cancel`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.detail || '取消失败');
+        return;
+      }
+      renderTaskPanel(data.task);
+      showToast('正在取消任务…');
+    }
+
+    function stopPolling() {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    }
+
+    function maybeStartPolling(data) {
+      if (!totalPending(data)) {
+        stopPolling();
+        return;
+      }
+      if (pollTimer) return;
+      let lastPending = totalPending(data);
+      pollTimer = setInterval(async () => {
+        try {
+          const resp = await fetch('/api/accumulated');
+          const fresh = await resp.json();
+          accumulatedResults = fresh.results || [];
+          renderAll(null, fresh);
+          const nowPending = totalPending(fresh);
+          if (lastPending > 0 && nowPending === 0) {
+            showToast('后台处理已全部完成');
+            stopPolling();
+          }
+          lastPending = nowPending;
+        } catch (_) {
+          stopPolling();
+        }
+      }, 3000);
+    }
+
+    async function loadAccumulated() {
+      const resp = await fetch('/api/accumulated');
+      const data = await resp.json();
+      accumulatedResults = data.results || [];
+      renderAll(null, data);
+    }
+
+    async function loadHistory() {
+      const resp = await fetch('/api/history');
+      const data = await resp.json();
+      const snapshots = data.snapshots || [];
+      if (!snapshots.length) {
+        historyList.innerHTML = '<li class="history-meta">暂无历史存档</li>';
+        return;
+      }
+      historyList.innerHTML = snapshots.map((s) => `
+        <li class="history-item" data-id="${escapeAttr(s.id)}">
+          <div class="history-item-head">
+            <div>
+              <div class="history-name">${escapeHtml(s.name)}</div>
+              <div class="history-meta">${s.count} 条 · ${escapeHtml(s.updated_at || s.created_at || '')}</div>
+            </div>
+          </div>
+          <div class="history-actions">
+            <button class="btn-secondary btn-small" data-restore="${escapeAttr(s.id)}" data-mode="merge">合并到当前</button>
+            <button class="btn-secondary btn-small" data-restore="${escapeAttr(s.id)}" data-mode="replace">替换当前</button>
+            <button class="btn-danger btn-secondary btn-small" data-delete-history="${escapeAttr(s.id)}">删除</button>
+          </div>
+        </li>
+      `).join('');
+
+      historyList.querySelectorAll('[data-restore]').forEach((btn) => {
+        btn.addEventListener('click', () => restoreHistory(
+          btn.getAttribute('data-restore'),
+          btn.getAttribute('data-mode')
+        ));
+      });
+      historyList.querySelectorAll('[data-delete-history]').forEach((btn) => {
+        btn.addEventListener('click', () => deleteHistory(btn.getAttribute('data-delete-history')));
+      });
+    }
+
+    async function saveHistory() {
+      if (!accumulatedResults.length) {
+        alert('当前列表为空，无法存档');
+        return;
+      }
+      const name = prompt('请输入存档名称', `存档 ${new Date().toLocaleString('zh-CN')}`);
+      if (name === null) return;
+      const resp = await fetch('/api/history/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, results: accumulatedResults }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '存档失败');
+      showToast(`已存档：${data.name}（${data.count} 条）`);
+      loadHistory();
+    }
+
+    async function restoreHistory(snapshotId, mode) {
+      const label = mode === 'replace' ? '替换' : '合并';
+      if (!confirm(`确定${label}加载该历史存档到当前列表？`)) return;
+      const resp = await fetch(`/api/history/${encodeURIComponent(snapshotId)}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '加载失败');
+      accumulatedResults = data.accumulated.results || [];
+      renderAll(data.merge || null, data.accumulated);
+      showToast(`已${label}加载 ${data.count} 条历史记录`);
+    }
+
+    async function deleteHistory(snapshotId) {
+      if (!confirm('确定删除该历史存档？此操作不可恢复。')) return;
+      await fetch(`/api/history/${encodeURIComponent(snapshotId)}`, { method: 'DELETE' });
+      showToast('历史存档已删除');
+      loadHistory();
+    }
+
+    async function supplementTranscribeAll(force = false) {
+      const resp = await fetch('/api/transcribe/supplement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          force,
+          long_video: longVideo.checked,
+          whisper_model: whisperModel.value,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || data.message || '请求失败');
+      if (!data.queued) {
+        showToast(data.message || '没有需要转写的视频笔记');
+        return;
+      }
+      await loadAccumulated();
+      showToast(`已排队 ${data.queued} 条视频转写，后台处理中…`);
+    }
+
+    async function supplementTranscribeOne(feedId, force = false) {
+      const q = new URLSearchParams({
+        force: force ? 'true' : 'false',
+        long_video: longVideo.checked ? 'true' : 'false',
+        whisper_model: whisperModel.value || '',
+      });
+      const resp = await fetch(`/api/transcribe/supplement/${encodeURIComponent(feedId)}?${q}`, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || '转写排队失败');
+      await loadAccumulated();
+      showToast(force ? '已重新排队转写' : '已排队视频转写');
+    }
+
+    async function supplementOcrAll(force = false) {
+      const resp = await fetch('/api/ocr/supplement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || data.message || '请求失败');
+      if (!data.queued) {
+        showToast(data.message || '没有需要补充 OCR 的笔记');
+        return;
+      }
+      await loadAccumulated();
+      showToast(`已排队 ${data.queued} 条图片 OCR，后台处理中…`);
+    }
+
+    async function supplementOcrOne(feedId, force = false) {
+      const url = `/api/ocr/supplement/${encodeURIComponent(feedId)}?force=${force ? 'true' : 'false'}`;
+      const resp = await fetch(url, { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || 'OCR 排队失败');
+      await loadAccumulated();
+      showToast(force ? '已重新排队 OCR' : '已排队补充 OCR');
+    }
+
+    async function removeItem(feedId) {
+      if (!feedId) return;
+      const resp = await fetch(`/api/accumulated/${encodeURIComponent(feedId)}`, { method: 'DELETE' });
+      const data = await resp.json();
+      accumulatedResults = data.results || [];
+      renderAll(null, data);
+      showToast('已移除 1 条');
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function escapeAttr(s) {
+      return String(s).replaceAll('"', '&quot;');
+    }
+
+    async function extract() {
+      const text = input.value.trim();
+      if (!text) {
+        alert('请先粘贴小红书链接');
+        return;
+      }
+
+      extractBtn.disabled = true;
+      loading.classList.add('show');
+      loadingText.textContent = '正在启动任务…';
+
+      try {
+        const resp = await fetch('/api/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            transcribe_video: transcribeVideo.checked,
+            long_video: longVideo.checked,
+            ocr_images: ocrImages.checked,
+            cache_images: cacheImages.checked,
+            accumulate: true,
+            whisper_model: whisperModel.value,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || '请求失败');
+
+        input.value = '';
+        loading.classList.remove('show');
+
+        if (data.accumulated) {
+          accumulatedResults = data.accumulated.results || [];
+          renderAll(data.merge, data.accumulated);
+        }
+
+        if (data.task) {
+          renderTaskPanel(data.task);
+          maybeStartTaskPolling(data.task.id);
+          showToast(`任务已启动，共 ${data.task.extract_total} 条链接`);
+        }
+      } catch (err) {
+        alert(err.message || String(err));
+        extractBtn.disabled = false;
+        loading.classList.remove('show');
+        loadingText.textContent = '正在提取，请稍候…';
+      }
+    }
+
+    async function exportCsv() {
+      if (!accumulatedResults.length) {
+        alert('没有可导出的数据');
+        return;
+      }
+      const resp = await fetch('/api/export/csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        alert(data.detail || '导出失败');
+        return;
+      }
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `xhs_notes_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      showToast(`CSV 已导出 ${accumulatedResults.length} 条`);
+    }
+
+    async function exportExcel() {
+      if (!accumulatedResults.length) {
+        alert('没有可导出的数据');
+        return;
+      }
+      exportExcelBtn.disabled = true;
+      exportExcelBtn.textContent = '生成 Excel 中…';
+      try {
+        const resp = await fetch('/api/export/excel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          throw new Error(data.detail || '导出失败');
+        }
+        const blob = await resp.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `xhs_notes_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        showToast(`Excel 已导出（含嵌入图片）`);
+      } catch (err) {
+        alert(err.message || String(err));
+      } finally {
+        exportExcelBtn.disabled = accumulatedResults.length === 0;
+        exportExcelBtn.textContent = '导出 Excel（含图片）';
+      }
+    }
+
+    async function clearAll() {
+      if (!accumulatedResults.length) return;
+
+      const archiveName = prompt(
+        `当前有 ${accumulatedResults.length} 条记录。\n\n输入存档名称可「先存档再清空」；直接点取消则中止；留空名称并确定则直接清空。`,
+        `存档 ${new Date().toLocaleString('zh-CN')}`
+      );
+      if (archiveName === null) return;
+
+      if (archiveName.trim()) {
+        await fetch('/api/accumulated/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ archive_name: archiveName.trim() }),
+        });
+        showToast('已存档并清空当前列表');
+        loadHistory();
+      } else {
+        if (!confirm(`确定直接清空 ${accumulatedResults.length} 条（不存档）？`)) return;
+        await fetch('/api/accumulated', { method: 'DELETE' });
+        showToast('已清空当前列表');
+      }
+
+      accumulatedResults = [];
+      stopPolling();
+      renderAll(null, { pending_transcriptions: 0, pending_ocr: 0, pending_image_cache: 0 });
+    }
+
+    extractBtn.addEventListener('click', extract);
+    taskPauseBtn.addEventListener('click', () => pauseTaskAction().catch((e) => alert(e.message)));
+    taskResumeBtn.addEventListener('click', () => resumeTaskAction().catch((e) => alert(e.message)));
+    taskCancelBtn.addEventListener('click', () => cancelTaskAction().catch((e) => alert(e.message)));
+    clearInputBtn.addEventListener('click', () => { input.value = ''; });
+    clearAllBtn.addEventListener('click', clearAll);
+    saveHistoryBtn.addEventListener('click', () => saveHistory().catch((e) => alert(e.message)));
+    supplementOcrAllBtn.addEventListener('click', () => supplementOcrAll(false).catch((e) => alert(e.message)));
+    supplementTranscribeAllBtn.addEventListener('click', () => supplementTranscribeAll(false).catch((e) => alert(e.message)));
+    exportCsvBtn.addEventListener('click', exportCsv);
+    exportExcelBtn.addEventListener('click', exportExcel);
+    cardViewBtn.addEventListener('click', () => setView('card'));
+    tableViewBtn.addEventListener('click', () => setView('table'));
+    async function loadVersion() {
+      try {
+        const resp = await fetch('/api/health');
+        const data = await resp.json();
+        if (data.version) {
+          const badge = document.getElementById('versionBadge');
+          badge.textContent = data.mode === 'demo'
+            ? `v${data.version} · 体验版演示`
+            : `v${data.version} · 无需平台登录`;
+          if (data.mode === 'demo') {
+            badge.style.background = 'linear-gradient(135deg,#f59e0b,#fbbf24)';
+            badge.style.color = '#1a1a1a';
+          }
+        }
+      } catch (_) {}
+    }
+
+    let xhsDiscoverSources = [];
+
+    function syncXhsDiscoverFields() {
+      const sel = document.getElementById('xhsDiscoverSource');
+      const profile = document.getElementById('xhsDiscoverProfile');
+      const filters = document.getElementById('xhsDiscoverFilters');
+      const src = xhsDiscoverSources.find((s) => s.id === sel.value);
+      const isAccount = src && src.id === 'xhs_account_notes';
+      const isSearch = src && src.id === 'xhs_search_keyword';
+      profile.style.display = isAccount ? '' : 'none';
+      if (filters) filters.style.display = isSearch ? '' : 'none';
+      document.getElementById('xhsDiscoverKeyword').placeholder = isAccount
+        ? '账号昵称（备注，可选）'
+        : '搜索关键词';
+    }
+
+    function xhsDiscoverExtra() {
+      const extra = {};
+      const profileUrl = document.getElementById('xhsDiscoverProfile').value.trim();
+      if (profileUrl) extra.profile_url = profileUrl;
+      const sortBy = document.getElementById('xhsDiscoverSort').value;
+      const noteType = document.getElementById('xhsDiscoverNoteType').value;
+      if (sortBy) extra.sort_by = sortBy;
+      if (noteType) extra.note_type = noteType;
+      const minLiked = document.getElementById('xhsDiscoverMinLiked').value;
+      const minCollected = document.getElementById('xhsDiscoverMinCollected').value;
+      const minComments = document.getElementById('xhsDiscoverMinComments').value;
+      const minViews = document.getElementById('xhsDiscoverMinViews').value;
+      if (minLiked !== '') extra.min_liked = Number(minLiked);
+      if (minCollected !== '') extra.min_collected = Number(minCollected);
+      if (minComments !== '') extra.min_comments = Number(minComments);
+      if (minViews !== '') extra.min_views = Number(minViews);
+      return extra;
+    }
+
+    async function loadXhsDiscoverSources() {
+      try {
+        const resp = await fetch('/api/discover/sources?platform=xhs');
+        const data = await resp.json();
+        xhsDiscoverSources = data.sources || [];
+        const sel = document.getElementById('xhsDiscoverSource');
+        sel.innerHTML = xhsDiscoverSources.map((s) =>
+          `<option value="${escapeAttr(s.id)}">${escapeHtml(s.name)}</option>`
+        ).join('');
+        syncXhsDiscoverFields();
+      } catch (_) {}
+    }
+
+    function renderXhsDiscover(data) {
+      document.getElementById('xhsDiscoverMsg').textContent = data.message || '';
+      const items = data.items || [];
+      const list = document.getElementById('xhsDiscoverList');
+      if (!items.length) {
+        list.innerHTML = '<li class="history-meta">暂无链接</li>';
+        return;
+      }
+      list.innerHTML = items.map((i) => `
+        <li class="history-item">
+          <div class="history-name">${escapeHtml(i.title || i.url)}</div>
+          <div class="history-meta">${escapeHtml(i.score || '')} ${escapeHtml(i.url)}</div>
+        </li>
+      `).join('');
+    }
+
+    async function xhsDiscover(thenExtract) {
+      const sourceId = document.getElementById('xhsDiscoverSource').value;
+      const keyword = document.getElementById('xhsDiscoverKeyword').value.trim();
+      const profileUrl = document.getElementById('xhsDiscoverProfile').value.trim();
+      if (!keyword && !profileUrl) {
+        alert('请填写关键词或主页链接');
+        return;
+      }
+      const extra = xhsDiscoverExtra();
+      const endpoint = thenExtract ? '/api/discover/extract' : '/api/discover/run';
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_id: sourceId,
+          keyword,
+          limit: Math.min(50, Math.max(1, Number(document.getElementById('xhsDiscoverLimit').value) || 20)),
+          extra,
+          transcribe_video: transcribeVideo.checked,
+          long_video: longVideo.checked,
+          ocr_images: ocrImages.checked,
+          cache_images: cacheImages.checked,
+          whisper_model: whisperModel.value,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail = data.detail || data.message || '发现失败';
+        alert(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        return;
+      }
+      renderXhsDiscover(data);
+      if (data.extract) {
+        renderTaskPanel(data.extract);
+        maybeStartTaskPolling(data.extract.id);
+      }
+    }
+
+    async function triggerXhsLogin() {
+      const btn = document.getElementById('xhsLoginBtn');
+      const msgEl = document.getElementById('xhsDiscoverMsg');
+      const old = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '正在唤起登录…';
+      try {
+        const statusResp = await fetch('/api/xhs/login-status');
+        const statusData = await statusResp.json().catch(() => ({}));
+        if (statusResp.ok && statusData.logged_in) {
+          msgEl.textContent = '当前小红书登录状态正常，可直接进行发现/提取。';
+          showToast('小红书已登录');
+          return;
+        }
+        const resp = await fetch('/api/xhs/login', { method: 'POST' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || '触发登录失败');
+        msgEl.textContent = data.message || '已唤起登录流程，请在 Chrome 中完成登录。';
+        showToast('已唤起小红书登录流程');
+      } catch (e) {
+        msgEl.textContent = e.message || String(e);
+        alert(msgEl.textContent);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
+    }
+
+    loadAccumulated().catch(() => {});
+    loadXhsDiscoverSources().catch(() => {});
+    loadHistory().catch(() => {});
+    loadCurrentTask().catch(() => {});
+    loadVersion().catch(() => {});
+    refreshWhisperStatus().catch(() => {});
+    renderTaskPanel(null);
+    updateReturnPanel();
+
+    document.getElementById('xhsDiscoverBtn').addEventListener('click', () => xhsDiscover(false).catch((e) => alert(e.message)));
+    document.getElementById('xhsDiscoverExtractBtn').addEventListener('click', () => xhsDiscover(true).catch((e) => alert(e.message)));
+    document.getElementById('xhsLoginBtn').addEventListener('click', () => triggerXhsLogin().catch((e) => alert(e.message)));
+    document.getElementById('xhsDiscoverSource').addEventListener('change', syncXhsDiscoverFields);
+    monitorQueryBtn.addEventListener('click', () => queryMonitorBatch().catch((e) => alert(e.message)));
+
+    document.querySelectorAll('.platform-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const p = btn.getAttribute('data-platform');
+        currentPlatform = p;
+        document.querySelectorAll('.platform-tab').forEach((b) => b.classList.toggle('active', b === btn));
+        document.getElementById('xhsApp').hidden = p !== 'xhs';
+        document.getElementById('channelsApp').hidden = p !== 'channels';
+        document.getElementById('intelApp').hidden = p !== 'intel';
+        document.getElementById('returnPanel').hidden = p === 'intel';
+        document.getElementById('monitorPanel').hidden = p === 'intel';
+        const logo = document.getElementById('brandLogo');
+        const sub = document.getElementById('appSubtitle');
+        if (p === 'channels') {
+          logo.textContent = '号';
+          logo.style.background = 'linear-gradient(135deg, var(--accent), var(--accent-2))';
+          sub.textContent = '微信视频号 · 关键词/账号发现 + 口播转写';
+          if (window.ChannelsApp) window.ChannelsApp.init();
+        } else if (p === 'intel') {
+          logo.textContent = '情';
+          logo.style.background = 'linear-gradient(135deg, var(--accent), var(--accent-2))';
+          sub.textContent = '内容情报中心 · 热点雷达 + 自有内容表现追踪';
+          if (window.IntelApp) window.IntelApp.init();
+        } else {
+          logo.textContent = '红';
+          logo.style.background = 'linear-gradient(135deg, var(--accent), var(--accent-2))';
+          sub.textContent = '小红书 · 关键词/账号发现 + 链接提取';
+        }
+        if (p !== 'intel') updateReturnPanel();
+      });
+    });
+  </script>
+  <script src="/static/channels.js?v=1.9.2"></script>
+  <script src="/static/intel.js?v=1.9.2"></script>
+</body>
+</html>
