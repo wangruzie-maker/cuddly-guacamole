@@ -47,7 +47,16 @@ def _topic_to_dict(row: Any) -> dict[str, Any]:
 
 def list_watch_topics() -> list[dict[str, Any]]:
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM watch_topics ORDER BY created_at DESC").fetchall()
+    rows = conn.execute(
+        """SELECT t.*, COALESCE(c.item_count, 0) AS item_count
+           FROM watch_topics t
+           LEFT JOIN (
+             SELECT watch_topic_id, COUNT(*) AS item_count
+             FROM intel_items
+             GROUP BY watch_topic_id
+           ) c ON c.watch_topic_id = t.id
+           ORDER BY t.created_at DESC"""
+    ).fetchall()
     return [_topic_to_dict(r) for r in rows]
 
 
@@ -434,21 +443,65 @@ def list_radar_items(
     platform: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
+    if not topic_id:
+        conn = get_conn()
+        where = []
+        params: list[Any] = []
+        if platform:
+            where.append("platform=?")
+            params.append(platform)
+        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        params.append(max(1, min(500, limit)))
+        rows = conn.execute(
+            f"SELECT * FROM intel_items {clause} ORDER BY hot_score DESC LIMIT ?", params
+        ).fetchall()
+        from intel_product import enrich_item
+
+        return [enrich_item(dict(r)) for r in rows]
+    result = list_topic_items(
+        topic_id,
+        platform=platform,
+        page=1,
+        page_size=max(1, min(500, limit)),
+    )
+    return result["items"]
+
+
+def list_topic_items(
+    topic_id: str,
+    *,
+    platform: str | None = None,
+    page: int = 1,
+    page_size: int = 10,
+) -> dict[str, Any]:
+    """Paginated viral items scoped to a single watch topic."""
+    from intel_product import enrich_item
+
+    if not get_watch_topic(topic_id):
+        raise ValueError("选题不存在")
     conn = get_conn()
-    where = []
-    params: list[Any] = []
-    if topic_id:
-        where.append("watch_topic_id=?")
-        params.append(topic_id)
+    where = ["watch_topic_id=?"]
+    params: list[Any] = [topic_id]
     if platform:
         where.append("platform=?")
         params.append(platform)
-    clause = ("WHERE " + " AND ".join(where)) if where else ""
-    params.append(max(1, min(500, limit)))
+    clause = "WHERE " + " AND ".join(where)
+    page = max(1, int(page or 1))
+    page_size = max(1, min(50, int(page_size or 10)))
+    offset = (page - 1) * page_size
+    total = int(conn.execute(f"SELECT COUNT(*) AS c FROM intel_items {clause}", params).fetchone()["c"])
     rows = conn.execute(
-        f"SELECT * FROM intel_items {clause} ORDER BY hot_score DESC LIMIT ?", params
+        f"SELECT * FROM intel_items {clause} ORDER BY hot_score DESC LIMIT ? OFFSET ?",
+        [*params, page_size, offset],
     ).fetchall()
-    return [dict(r) for r in rows]
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "items": [enrich_item(dict(r)) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 def radar_summary(*, topic_id: str | None = None, platform: str | None = None) -> dict[str, Any]:
@@ -702,6 +755,17 @@ def promote_suggestion(
 # ---------------------------------------------------------------------------
 
 
+def _tracked_row_to_api(row: dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    d["metrics"] = {
+        "liked_count": int(d.get("latest_liked") or 0),
+        "collected_count": int(d.get("latest_collected") or 0),
+        "comment_count": int(d.get("latest_comment") or 0),
+        "share_count": int(d.get("latest_share") or 0),
+    }
+    return d
+
+
 def list_tracked_posts() -> list[dict[str, Any]]:
     conn = get_conn()
     rows = conn.execute(
@@ -716,7 +780,7 @@ def list_tracked_posts() -> list[dict[str, Any]]:
               ORDER BY captured_at DESC LIMIT 1) as latest_share
            FROM tracked_posts t ORDER BY t.created_at DESC"""
     ).fetchall()
-    return [dict(r) for r in rows]
+    return [_tracked_row_to_api(dict(r)) for r in rows]
 
 
 def _refresh_tracked_row(post: dict[str, Any]) -> dict[str, Any]:
@@ -773,15 +837,32 @@ def _refresh_tracked_row(post: dict[str, Any]) -> dict[str, Any]:
 
 
 def register_tracked_post(
-    *, platform: str, url: str, account_name: str = "", title: str = "", published_at: str = ""
+    *,
+    platform: str,
+    url: str,
+    account_name: str = "",
+    title: str = "",
+    published_at: str = "",
+    external_content_id: str = "",
+    external_account_id: str = "",
 ) -> dict[str, Any]:
     conn = get_conn()
     now = now_str()
     cur = conn.execute(
         """INSERT INTO tracked_posts
-           (platform, account_name, title, url, published_at, created_at)
-           VALUES (?,?,?,?,?,?)""",
-        (platform, account_name.strip(), title.strip(), url.strip(), published_at.strip(), now),
+           (platform, account_name, title, url, published_at, external_content_id,
+            external_account_id, created_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            platform,
+            account_name.strip(),
+            title.strip(),
+            url.strip(),
+            published_at.strip(),
+            external_content_id.strip(),
+            external_account_id.strip(),
+            now,
+        ),
     )
     conn.commit()
     post_id = int(cur.lastrowid)
@@ -816,7 +897,7 @@ def get_tracked_post_with_metrics(post_id: int) -> dict[str, Any] | None:
            FROM tracked_posts t WHERE t.id=?""",
         (post_id,),
     ).fetchone()
-    return dict(row) if row else None
+    return _tracked_row_to_api(dict(row)) if row else None
 
 
 def delete_tracked_post(post_id: int) -> bool:

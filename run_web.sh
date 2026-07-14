@@ -12,6 +12,13 @@ if ! python3 -c "from whisper_config import DEFAULT_WHISPER_MODEL; from video_sc
   echo "首次使用可运行 ./setup_whisper.sh 预下载语音识别模型"
 fi
 
-echo "启动 Web 工具: http://127.0.0.1:8765"
+HOST="${APP_HOST:-127.0.0.1}"
+PORT="${APP_PORT:-8765}"
+RELOAD="${APP_RELOAD:-1}"
+echo "启动 Web 工具: http://${HOST}:${PORT}"
 echo "（若端口被旧进程占用，请先关闭旧服务再启动）"
-exec python3 -m uvicorn web_server:app --host 127.0.0.1 --port 8765 --reload
+if [[ "$RELOAD" == "1" ]]; then
+  exec python3 -m uvicorn web_server:app --host "$HOST" --port "$PORT" --reload
+else
+  exec python3 -m uvicorn web_server:app --host "$HOST" --port "$PORT"
+fi

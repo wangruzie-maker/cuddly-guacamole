@@ -54,11 +54,12 @@ from core.pipeline import run_discover, run_discover_and_extract
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
+CORS_ORIGINS = [o.strip() for o in os.environ.get("APP_CORS_ORIGINS", "*").split(",") if o.strip()]
 
-app = FastAPI(title="社媒内容提取", version="1.9.2")
+app = FastAPI(title="社媒内容提取", version="1.12.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -793,4 +794,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("web_server:app", host="127.0.0.1", port=8765, reload=True)
+    uvicorn.run(
+        "web_server:app",
+        host=os.environ.get("APP_HOST", "127.0.0.1"),
+        port=int(os.environ.get("APP_PORT", "8765")),
+        reload=os.environ.get("APP_RELOAD", "1") == "1",
+    )

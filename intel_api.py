@@ -1,26 +1,38 @@
-"""Content Intelligence Hub API — hot-topic radar + owned-content tracking.
-
-Mounted under /api/intel/* in web_server.py. This module is intentionally
-self-contained (own SQLite store, own router) so it can later be lifted out into
-a standalone service when integrating with the material-production platform —
-see docs/INTEL_PLATFORM_INTEGRATION.md for the contract this API already follows.
-"""
+"""Content Intelligence Hub API — hot-topic radar + owned-content tracking."""
 
 from __future__ import annotations
 
+import hmac
+import os
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+import intel_product
 import intel_service
 from intel_scheduler import start_scheduler
 
 router = APIRouter(prefix="/api/intel", tags=["intel"])
 
-# Started once on module import (web_server.py imports this module a single time,
-# and is run without --reload), so a plain module-level call is sufficient here.
 start_scheduler()
+
+
+def _service_token() -> str:
+    return os.environ.get("INTEL_SERVICE_TOKEN", "").strip()
+
+
+def verify_intel_service_token(
+    x_intel_service_token: str | None = Header(None, alias="X-Intel-Service-Token"),
+) -> None:
+    if os.environ.get("INTEL_STRICT_AUTH", "").strip() != "1":
+        return
+    expected = _service_token()
+    if not expected:
+        return
+    if not x_intel_service_token or not hmac.compare_digest(x_intel_service_token, expected):
+        raise HTTPException(401, "无效的服务令牌（需 X-Intel-Service-Token 请求头）")
 
 
 class WatchTopicCreate(BaseModel):
@@ -49,6 +61,8 @@ class TrackedPostCreate(BaseModel):
     account_name: str = ""
     title: str = ""
     published_at: str = ""
+    external_content_id: str = ""
+    external_account_id: str = ""
 
 
 class PromoteSuggestion(BaseModel):
@@ -58,9 +72,14 @@ class PromoteSuggestion(BaseModel):
     limit_per_run: int = 20
 
 
+class TopicFromTemplate(BaseModel):
+    template_id: str
+    name: str = ""
+
+
 @router.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True}
+    return {"ok": True, "strict_auth": os.environ.get("INTEL_STRICT_AUTH", "").strip() == "1"}
 
 
 # ---------------------------------------------------------------------------
@@ -68,12 +87,12 @@ def health() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/watch-topics")
+@router.get("/watch-topics", dependencies=[Depends(verify_intel_service_token)])
 def api_list_watch_topics() -> dict[str, Any]:
     return {"items": intel_service.list_watch_topics()}
 
 
-@router.post("/watch-topics")
+@router.post("/watch-topics", dependencies=[Depends(verify_intel_service_token)])
 def api_create_watch_topic(body: WatchTopicCreate) -> dict[str, Any]:
     if not body.keywords:
         raise HTTPException(400, "请至少填写一个关键词")
@@ -89,7 +108,20 @@ def api_create_watch_topic(body: WatchTopicCreate) -> dict[str, Any]:
     return {"item": topic}
 
 
-@router.patch("/watch-topics/{topic_id}")
+@router.post("/watch-topics/from-template", dependencies=[Depends(verify_intel_service_token)])
+def api_create_from_template(body: TopicFromTemplate) -> dict[str, Any]:
+    tpl = next((t for t in intel_product.SEARCH_DIMENSION_TEMPLATES if t["id"] == body.template_id), None)
+    if not tpl:
+        raise HTTPException(404, "模板不存在")
+    topic = intel_service.create_watch_topic(
+        name=body.name.strip() or tpl["name"],
+        platforms=list(tpl.get("platforms") or ["xhs"]),
+        keywords=list(tpl.get("keywords") or []),
+    )
+    return {"item": topic, "template": tpl}
+
+
+@router.patch("/watch-topics/{topic_id}", dependencies=[Depends(verify_intel_service_token)])
 def api_update_watch_topic(topic_id: str, body: WatchTopicUpdate) -> dict[str, Any]:
     topic = intel_service.update_watch_topic(topic_id, **body.model_dump(exclude_unset=True))
     if not topic:
@@ -97,7 +129,7 @@ def api_update_watch_topic(topic_id: str, body: WatchTopicUpdate) -> dict[str, A
     return {"item": topic}
 
 
-@router.delete("/watch-topics/{topic_id}")
+@router.delete("/watch-topics/{topic_id}", dependencies=[Depends(verify_intel_service_token)])
 def api_delete_watch_topic(topic_id: str) -> dict[str, Any]:
     ok = intel_service.delete_watch_topic(topic_id)
     if not ok:
@@ -105,7 +137,7 @@ def api_delete_watch_topic(topic_id: str) -> dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/watch-topics/{topic_id}/run")
+@router.post("/watch-topics/{topic_id}/run", dependencies=[Depends(verify_intel_service_token)])
 def api_run_watch_topic(topic_id: str) -> dict[str, Any]:
     try:
         return intel_service.run_watch_topic(topic_id)
@@ -113,37 +145,124 @@ def api_run_watch_topic(topic_id: str) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.get("/watch-topics/{topic_id}/items", dependencies=[Depends(verify_intel_service_token)])
+def api_list_topic_items(
+    topic_id: str,
+    platform: str | None = None,
+    page: int = 1,
+    page_size: int = 10,
+) -> dict[str, Any]:
+    try:
+        return intel_service.list_topic_items(
+            topic_id, platform=platform, page=page, page_size=page_size
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/watch-topics/{topic_id}/directions", dependencies=[Depends(verify_intel_service_token)])
+def api_topic_directions(topic_id: str, limit: int = 5) -> dict[str, Any]:
+    try:
+        return intel_product.generate_topic_directions(topic_id, limit=max(1, min(20, limit)))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/watch-topics/{topic_id}/export.md", dependencies=[Depends(verify_intel_service_token)])
+def api_export_topic_md(topic_id: str) -> Response:
+    try:
+        content = intel_product.export_topic_pack_markdown(topic_id)
+        topic = intel_service.get_watch_topic(topic_id)
+        name = (topic or {}).get("name") or topic_id
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    filename = f"{name}-选题包.md".replace("/", "-")
+    return Response(
+        content=content,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ---------------------------------------------------------------------------
-# Radar
+# Radar (legacy)
 # ---------------------------------------------------------------------------
 
 
-@router.get("/radar")
-def api_radar(topic_id: str | None = None, platform: str | None = None, limit: int = 100) -> dict[str, Any]:
-    return {"items": intel_service.list_radar_items(topic_id=topic_id, platform=platform, limit=limit)}
+@router.get("/radar", dependencies=[Depends(verify_intel_service_token)])
+def api_radar(
+    topic_id: str | None = None,
+    platform: str | None = None,
+    page: int = 1,
+    page_size: int = 10,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    if not topic_id:
+        return {"items": [], "total": 0, "page": 1, "page_size": page_size, "total_pages": 0}
+    if limit is not None:
+        return {
+            "items": intel_service.list_radar_items(
+                topic_id=topic_id, platform=platform, limit=limit
+            ),
+            "total": 0,
+            "page": 1,
+            "page_size": limit,
+            "total_pages": 0,
+        }
+    return intel_service.list_topic_items(
+        topic_id, platform=platform, page=page, page_size=page_size
+    )
 
 
-@router.get("/radar/summary")
+@router.get("/radar/summary", dependencies=[Depends(verify_intel_service_token)])
 def api_radar_summary(topic_id: str | None = None, platform: str | None = None) -> dict[str, Any]:
     return intel_service.radar_summary(topic_id=topic_id, platform=platform)
 
 
-@router.get("/items/{item_id}/history")
+@router.get("/items/{item_id}/history", dependencies=[Depends(verify_intel_service_token)])
 def api_item_history(item_id: int) -> dict[str, Any]:
     return {"items": intel_service.get_item_history(item_id)}
 
 
 # ---------------------------------------------------------------------------
-# 选题建议 (keyword / topic suggestions)
+# Templates & benchmark
 # ---------------------------------------------------------------------------
 
 
-@router.get("/suggestions")
+@router.get("/templates/search-dimensions", dependencies=[Depends(verify_intel_service_token)])
+def api_search_templates() -> dict[str, Any]:
+    return {"items": intel_product.SEARCH_DIMENSION_TEMPLATES}
+
+
+@router.get("/analytics/benchmark", dependencies=[Depends(verify_intel_service_token)])
+def api_benchmark() -> dict[str, Any]:
+    return intel_product.competitor_benchmark()
+
+
+# ---------------------------------------------------------------------------
+# Suggestions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mining/angles", dependencies=[Depends(verify_intel_service_token)])
+def api_mining_angles() -> dict[str, Any]:
+    return {"items": intel_product.MINING_ANGLES}
+
+
+@router.get("/mining/insights", dependencies=[Depends(verify_intel_service_token)])
+def api_mining_insights(topic_id: str | None = None) -> dict[str, Any]:
+    try:
+        return intel_product.mine_dimensional_insights(topic_id=topic_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/suggestions", dependencies=[Depends(verify_intel_service_token)])
 def api_list_suggestions(limit: int = 30) -> dict[str, Any]:
     return {"items": intel_service.list_keyword_suggestions(limit=limit)}
 
 
-@router.get("/suggestions/items")
+@router.get("/suggestions/items", dependencies=[Depends(verify_intel_service_token)])
 def api_suggestion_items(ids: str) -> dict[str, Any]:
     try:
         item_ids = [int(x) for x in ids.split(",") if x.strip()]
@@ -152,7 +271,7 @@ def api_suggestion_items(ids: str) -> dict[str, Any]:
     return {"items": intel_service.get_suggestion_sample_items(item_ids)}
 
 
-@router.post("/suggestions/promote")
+@router.post("/suggestions/promote", dependencies=[Depends(verify_intel_service_token)])
 def api_promote_suggestion(body: PromoteSuggestion) -> dict[str, Any]:
     try:
         topic = intel_service.promote_suggestion(
@@ -164,16 +283,16 @@ def api_promote_suggestion(body: PromoteSuggestion) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 数据分析 (analytics)
+# Analytics
 # ---------------------------------------------------------------------------
 
 
-@router.get("/analytics/overview")
+@router.get("/analytics/overview", dependencies=[Depends(verify_intel_service_token)])
 def api_analytics_overview() -> dict[str, Any]:
     return intel_service.cross_topic_overview()
 
 
-@router.get("/analytics/topics/{topic_id}")
+@router.get("/analytics/topics/{topic_id}", dependencies=[Depends(verify_intel_service_token)])
 def api_analytics_topic(topic_id: str) -> dict[str, Any]:
     try:
         return intel_service.topic_analytics(topic_id)
@@ -182,16 +301,16 @@ def api_analytics_topic(topic_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Tracked (owned) posts
+# Tracked posts
 # ---------------------------------------------------------------------------
 
 
-@router.get("/tracked")
+@router.get("/tracked", dependencies=[Depends(verify_intel_service_token)])
 def api_list_tracked() -> dict[str, Any]:
     return {"items": intel_service.list_tracked_posts()}
 
 
-@router.post("/tracked")
+@router.post("/tracked", dependencies=[Depends(verify_intel_service_token)])
 def api_create_tracked(body: TrackedPostCreate) -> dict[str, Any]:
     if body.platform not in ("xhs", "channels"):
         raise HTTPException(400, "platform 必须是 xhs 或 channels")
@@ -204,13 +323,15 @@ def api_create_tracked(body: TrackedPostCreate) -> dict[str, Any]:
             account_name=body.account_name,
             title=body.title,
             published_at=body.published_at,
+            external_content_id=body.external_content_id,
+            external_account_id=body.external_account_id,
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(500, f"添加失败: {exc}") from exc
     return post
 
 
-@router.delete("/tracked/{post_id}")
+@router.delete("/tracked/{post_id}", dependencies=[Depends(verify_intel_service_token)])
 def api_delete_tracked(post_id: int) -> dict[str, Any]:
     ok = intel_service.delete_tracked_post(post_id)
     if not ok:
@@ -218,7 +339,7 @@ def api_delete_tracked(post_id: int) -> dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/tracked/{post_id}/refresh")
+@router.post("/tracked/{post_id}/refresh", dependencies=[Depends(verify_intel_service_token)])
 def api_refresh_tracked(post_id: int) -> dict[str, Any]:
     try:
         return intel_service.refresh_tracked_post(post_id)
@@ -226,11 +347,11 @@ def api_refresh_tracked(post_id: int) -> dict[str, Any]:
         raise HTTPException(404, str(exc)) from exc
 
 
-@router.post("/tracked/refresh-all")
+@router.post("/tracked/refresh-all", dependencies=[Depends(verify_intel_service_token)])
 def api_refresh_all_tracked() -> dict[str, Any]:
     return {"results": intel_service.refresh_all_tracked_posts()}
 
 
-@router.get("/tracked/{post_id}/history")
+@router.get("/tracked/{post_id}/history", dependencies=[Depends(verify_intel_service_token)])
 def api_tracked_history(post_id: int) -> dict[str, Any]:
     return {"items": intel_service.get_tracked_history(post_id)}

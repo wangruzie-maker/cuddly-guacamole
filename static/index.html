@@ -116,6 +116,13 @@
       background: rgba(47, 123, 255, 0.14);
     }
 
+    .intel-subtab.active {
+      border-color: rgba(47, 123, 255, 0.45);
+      background: rgba(47, 123, 255, 0.14);
+    }
+
+    details.intel-topic-items-fold > summary::-webkit-details-marker { display: none; }
+
     #channelsApp[hidden] { display: none !important; }
     #intelApp[hidden] { display: none !important; }
 
@@ -691,7 +698,7 @@
           <p class="sub" id="appSubtitle">小红书 · 关键词/账号发现 + 链接提取</p>
         </div>
       </div>
-      <div class="badge" id="versionBadge">v1.9.2</div>
+      <div class="badge" id="versionBadge">v1.12.0</div>
     </header>
 
     <nav class="platform-tabs" id="platformTabs">
@@ -1991,6 +1998,22 @@
     renderTaskPanel(null);
     updateReturnPanel();
 
+    window.AppBridge = {
+      openXhsExtract(url) {
+        const tab = document.querySelector('.platform-tab[data-platform="xhs"]');
+        if (tab) tab.click();
+        const input = document.getElementById('input');
+        if (input && url) {
+          const lines = (input.value || '').split('\n').map((s) => s.trim()).filter(Boolean);
+          if (!lines.includes(url)) {
+            input.value = lines.length ? `${input.value.trim()}\n${url}` : url;
+          }
+          input.focus();
+          input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      },
+    };
+
     document.getElementById('xhsDiscoverBtn').addEventListener('click', () => xhsDiscover(false).catch((e) => alert(e.message)));
     document.getElementById('xhsDiscoverExtractBtn').addEventListener('click', () => xhsDiscover(true).catch((e) => alert(e.message)));
     document.getElementById('xhsLoginBtn').addEventListener('click', () => triggerXhsLogin().catch((e) => alert(e.message)));
@@ -2028,7 +2051,7 @@
       });
     });
   </script>
-  <script src="/static/channels.js?v=1.9.2"></script>
-  <script src="/static/intel.js?v=1.9.2"></script>
+  <script src="/static/channels.js?v=1.12.0"></script>
+  <script src="/static/intel.js?v=1.12.1"></script>
 </body>
 </html>

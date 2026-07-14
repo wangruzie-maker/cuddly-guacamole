@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 PORT=8765
-EXPECTED_VERSION="1.9.2"
+EXPECTED_VERSION="1.12.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
@@ -29,7 +29,6 @@ server_version() {
 }
 
 routes_ok() {
-  # 登录鉴权开启后，大多数业务路由会返回 401（未登录），所以这里仅检查公开健康接口。
   curl -sf "${BASE_URL}/api/health" >/dev/null 2>&1
 }
 
