@@ -128,6 +128,29 @@ CREATE TABLE IF NOT EXISTS saved_creative_topics (
 );
 CREATE INDEX IF NOT EXISTS idx_saved_creative_topics_created
 ON saved_creative_topics(created_at DESC);
+
+-- 一等语料：从 XHS/Channels accumulated.json 同步，供分析/搜索
+CREATE TABLE IF NOT EXISTS corpus_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL,
+  feed_id TEXT DEFAULT '',
+  url TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE,
+  title TEXT DEFAULT '',
+  author TEXT DEFAULT '',
+  note_type TEXT DEFAULT '',
+  desc_text TEXT DEFAULT '',
+  image_ocr_text TEXT DEFAULT '',
+  video_script TEXT DEFAULT '',
+  status TEXT DEFAULT '',
+  watch_topic_id TEXT DEFAULT '',
+  liked_count INTEGER DEFAULT 0,
+  source_updated_at TEXT DEFAULT '',
+  synced_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_corpus_items_topic ON corpus_items(watch_topic_id);
+CREATE INDEX IF NOT EXISTS idx_corpus_items_platform ON corpus_items(platform);
+CREATE INDEX IF NOT EXISTS idx_corpus_items_synced ON corpus_items(synced_at DESC);
 """
 
 

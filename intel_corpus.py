@@ -113,6 +113,203 @@ def delete_saved_topic(topic_id: int) -> None:
     conn.commit()
 
 
+def _corpus_dedupe_key(platform: str, item: dict[str, Any]) -> str:
+    feed_id = str(item.get("feed_id") or "").strip()
+    if feed_id:
+        return f"{platform}:id:{feed_id}"
+    return f"{platform}:url:{str(item.get('url') or '').strip()}"
+
+
+def _url_topic_map() -> dict[str, str]:
+    rows = get_conn().execute(
+        "SELECT url, watch_topic_id FROM intel_items WHERE url IS NOT NULL AND url != ''"
+    ).fetchall()
+    mapping: dict[str, str] = {}
+    for row in rows:
+        url = str(row["url"] or "")
+        topic = str(row["watch_topic_id"] or "")
+        if url and topic and url not in mapping:
+            mapping[url] = topic
+    return mapping
+
+
+def _safe_int_count(value: Any) -> int:
+    if value is None or value is False:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return 0
+    try:
+        if text.endswith("万"):
+            return int(float(text[:-1]) * 10000)
+        if text.endswith("w") or text.endswith("W"):
+            return int(float(text[:-1]) * 10000)
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
+def sync_corpus_from_stores() -> dict[str, int]:
+    """Upsert extracted notes from JSON stores into corpus_items."""
+    url_topics = _url_topic_map()
+    conn = get_conn()
+    synced = 0
+    sources = [
+        ("xhs", load_results()),
+        ("channels", channels_result_store.load_results()),
+    ]
+    for platform, rows in sources:
+        for raw in rows:
+            url = str(raw.get("url") or "").strip()
+            if not url and not str(raw.get("feed_id") or "").strip():
+                continue
+            key = _corpus_dedupe_key(platform, raw)
+            conn.execute(
+                """INSERT INTO corpus_items(
+                     platform, feed_id, url, dedupe_key, title, author, note_type,
+                     desc_text, image_ocr_text, video_script, status, watch_topic_id,
+                     liked_count, source_updated_at, synced_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
+                   ON CONFLICT(dedupe_key) DO UPDATE SET
+                     feed_id=excluded.feed_id,
+                     url=excluded.url,
+                     title=excluded.title,
+                     author=excluded.author,
+                     note_type=excluded.note_type,
+                     desc_text=excluded.desc_text,
+                     image_ocr_text=excluded.image_ocr_text,
+                     video_script=excluded.video_script,
+                     status=excluded.status,
+                     watch_topic_id=CASE
+                       WHEN excluded.watch_topic_id != '' THEN excluded.watch_topic_id
+                       ELSE corpus_items.watch_topic_id
+                     END,
+                     liked_count=excluded.liked_count,
+                     source_updated_at=excluded.source_updated_at,
+                     synced_at=excluded.synced_at""",
+                (
+                    platform,
+                    str(raw.get("feed_id") or ""),
+                    url,
+                    key,
+                    str(raw.get("title") or ""),
+                    str(raw.get("author") or ""),
+                    str(raw.get("note_type") or ""),
+                    str(raw.get("desc") or ""),
+                    str(raw.get("image_ocr_text") or ""),
+                    str(raw.get("video_script") or ""),
+                    str(raw.get("status") or ""),
+                    url_topics.get(url, ""),
+                    _safe_int_count(raw.get("liked_count") if raw.get("liked_count") is not None else raw.get("liked")),
+                    str(raw.get("updated_at") or raw.get("extracted_at") or ""),
+                ),
+            )
+            synced += 1
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) AS c FROM corpus_items").fetchone()["c"]
+    return {"synced": synced, "total": int(total)}
+
+
+def load_corpus_items(
+    *,
+    topic_id: str | None = None,
+    limit: int = 200,
+    only_success: bool = True,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if only_success:
+        clauses.append("(status='' OR status='成功')")
+    if topic_id:
+        clauses.append("watch_topic_id=?")
+        params.append(topic_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(500, limit)))
+    rows = get_conn().execute(
+        f"""SELECT platform, feed_id, url, title, author, note_type,
+                   desc_text, image_ocr_text, video_script, status,
+                   watch_topic_id, liked_count
+            FROM corpus_items {where}
+            ORDER BY synced_at DESC, id DESC
+            LIMIT ?""",
+        params,
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        items.append(
+            {
+                "_platform": row["platform"],
+                "feed_id": row["feed_id"],
+                "url": row["url"],
+                "title": row["title"],
+                "author": row["author"],
+                "note_type": row["note_type"],
+                "desc": row["desc_text"],
+                "image_ocr_text": row["image_ocr_text"],
+                "video_script": row["video_script"],
+                "status": row["status"] or "成功",
+                "watch_topic_id": row["watch_topic_id"],
+                "liked_count": row["liked_count"],
+            }
+        )
+    return items
+
+
+def search_corpus(
+    query: str,
+    *,
+    topic_id: str | None = None,
+    limit: int = 30,
+) -> dict[str, Any]:
+    sync = sync_corpus_from_stores()
+    q = re.sub(r"\s+", " ", query or "").strip()
+    if not q:
+        return {"query": "", "items": [], "sync": sync, "total": 0}
+    like = f"%{q}%"
+    clauses = [
+        "(title LIKE ? OR desc_text LIKE ? OR image_ocr_text LIKE ? OR video_script LIKE ? OR author LIKE ?)"
+    ]
+    params: list[Any] = [like, like, like, like, like]
+    if topic_id:
+        clauses.append("watch_topic_id=?")
+        params.append(topic_id)
+    params.append(max(1, min(100, limit)))
+    rows = get_conn().execute(
+        f"""SELECT id, platform, url, title, author, note_type,
+                   substr(desc_text,1,160) AS desc_preview,
+                   length(image_ocr_text) AS ocr_len,
+                   length(video_script) AS script_len,
+                   liked_count, watch_topic_id
+            FROM corpus_items
+            WHERE {' AND '.join(clauses)}
+            ORDER BY liked_count DESC, id DESC
+            LIMIT ?""",
+        params,
+    ).fetchall()
+    items = []
+    for row in rows:
+        items.append(
+            {
+                "id": row["id"],
+                "platform": row["platform"],
+                "url": row["url"],
+                "title": row["title"] or "(无标题)",
+                "author": row["author"] or "",
+                "note_type": row["note_type"] or "",
+                "desc_preview": row["desc_preview"] or "",
+                "has_ocr": int(row["ocr_len"] or 0) > 0,
+                "has_script": int(row["script_len"] or 0) > 0,
+                "liked_count": row["liked_count"] or 0,
+                "watch_topic_id": row["watch_topic_id"] or "",
+            }
+        )
+    return {"query": q, "items": items, "total": len(items), "sync": sync}
+
+
 def _extract_brief_entities(brief: str) -> dict[str, Any]:
     """Parse creative brief into short entities + intent (not paste-whole-brief titles)."""
     text = re.sub(r"\s+", " ", brief or "").strip()
@@ -427,18 +624,24 @@ def analyze_corpus(
     brief: str = "",
 ) -> dict[str, Any]:
     """Summarize extracted corpus and produce evidence-backed creative topic prompts."""
-    allowed = _allowed_urls(topic_id)
-    combined = [
-        {**item, "_platform": "xhs"} for item in load_results()
-    ] + [
-        {**item, "_platform": "channels"} for item in channels_result_store.load_results()
-    ]
-    items = [
-        item
-        for item in combined
-        if item.get("status") == "成功"
-        and (allowed is None or str(item.get("url") or "") in allowed)
-    ][-max(1, min(500, limit)) :]
+    sync_info = sync_corpus_from_stores()
+    items = load_corpus_items(topic_id=topic_id, limit=limit, only_success=True)
+    # Fallback: raw JSON if DB empty (first run / sync miss)
+    if not items:
+        allowed = _allowed_urls(topic_id)
+        combined = [
+            {**item, "_platform": "xhs"} for item in load_results()
+        ] + [
+            {**item, "_platform": "channels"} for item in channels_result_store.load_results()
+        ]
+        items = [
+            item
+            for item in combined
+            if item.get("status") == "成功"
+            and (allowed is None or str(item.get("url") or "") in allowed)
+        ][-max(1, min(500, limit)) :]
+    else:
+        items = items[-max(1, min(500, limit)) :]
 
     word_counts: Counter[str] = Counter()
     title_counts: Counter[str] = Counter()
@@ -620,6 +823,7 @@ def analyze_corpus(
         "brief": brief,
         "llm_used": llm_used,
         "llm_error": llm_error,
+        "corpus_sync": sync_info,
         "summary": {
             "items": len(items),
             "with_ocr": sum(bool(str(item.get("image_ocr_text") or "").strip()) for item in items),

@@ -60,7 +60,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 CORS_ORIGINS = [o.strip() for o in os.environ.get("APP_CORS_ORIGINS", "*").split(",") if o.strip()]
 
-app = FastAPI(title="社媒内容提取", version="1.21.0")
+app = FastAPI(title="社媒内容提取", version="1.22.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS or ["*"],

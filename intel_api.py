@@ -13,7 +13,14 @@ from pydantic import BaseModel, Field
 
 import intel_product
 import intel_service
-from intel_corpus import analyze_corpus, delete_saved_topic, list_saved_topics, save_creative_topic
+from intel_corpus import (
+    analyze_corpus,
+    delete_saved_topic,
+    list_saved_topics,
+    save_creative_topic,
+    search_corpus,
+    sync_corpus_from_stores,
+)
 from intel_scheduler import start_scheduler
 
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -315,6 +322,20 @@ def api_corpus_analysis(
         batch=max(0, batch),
         brief=brief,
     )
+
+
+@router.post("/corpus/sync", dependencies=[Depends(verify_intel_service_token)])
+def api_corpus_sync() -> dict[str, Any]:
+    return sync_corpus_from_stores()
+
+
+@router.get("/corpus/search", dependencies=[Depends(verify_intel_service_token)])
+def api_corpus_search(
+    q: str = "",
+    topic_id: str | None = None,
+    limit: int = 30,
+) -> dict[str, Any]:
+    return search_corpus(q, topic_id=topic_id, limit=max(1, min(100, limit)))
 
 
 @router.get("/corpus/topics", dependencies=[Depends(verify_intel_service_token)])

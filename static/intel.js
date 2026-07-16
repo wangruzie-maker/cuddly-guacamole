@@ -396,45 +396,88 @@
     }, [
       el('span', { id: 'intelXhsStatus', class: 'hint', style: 'margin:0;' }, ['小红书：检测中…']),
       el('button', { class: 'btn-secondary btn-small', id: 'intelXhsLoginBtn', onclick: triggerXhsLogin }, ['登录小红书']),
-      el('span', { class: 'hint', style: 'margin:0;flex:1 1 200px;' }, [
-        '先获取有数据依据的候选内容，再勾选需要转录的样本。',
+      el('span', { id: 'intelChannelsStatus', class: 'hint', style: 'margin:0;' }, ['视频号：检测中…']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => refreshLoginStatus({ force: true }),
+      }, ['刷新状态']),
+      el('span', { id: 'intelLoginCheckedAt', class: 'hint', style: 'margin:0;color:var(--muted);' }, []),
+      el('span', { class: 'hint', style: 'margin:0;flex:1 1 160px;' }, [
+        '采集依赖本机登录态；状态未知时优先点「刷新状态」再跑任务。',
       ]),
     ]);
   }
 
-  async function refreshLoginStatus() {
+  function _fmtCheckedAt(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '';
+    return `检测于 ${d.toLocaleTimeString()}`;
+  }
+
+  async function refreshLoginStatus(opts) {
+    const force = !!(opts && opts.force);
     const statusEl = document.getElementById('intelXhsStatus');
+    const channelsEl = document.getElementById('intelChannelsStatus');
+    const checkedEl = document.getElementById('intelLoginCheckedAt');
     if (!statusEl) return;
     const cachedOk = sessionStorage.getItem(XHS_LOGIN_OK_KEY) === '1';
+    const checkedAt = Date.now();
     try {
       const resp = await fetch('/api/xhs/login-status');
       const data = await resp.json();
       if (data.logged_in === true) {
         sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
-        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
-        statusEl.textContent = '小红书：✅ 已登录';
+        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(checkedAt));
+        statusEl.textContent = '小红书：已登录';
         statusEl.style.color = 'var(--ok)';
+        statusEl.title = data.message || '';
       } else if (data.logged_in === false && data.reason === 'not_logged_in') {
         sessionStorage.removeItem(XHS_LOGIN_OK_KEY);
         sessionStorage.removeItem(XHS_LOGIN_AT_KEY);
         statusEl.textContent = '小红书：需登录';
         statusEl.style.color = 'var(--err)';
-      } else if (cachedOk || data.session_reusable) {
+        statusEl.title = data.message || '请点击登录小红书';
+      } else if (!force && (cachedOk || data.session_reusable)) {
         statusEl.textContent = '小红书：本机会话可用';
         statusEl.style.color = 'var(--ok)';
+        statusEl.title = data.message || data.reason || '探测不确定，沿用本机会话';
       } else {
-        statusEl.textContent = '小红书：状态未知';
+        statusEl.textContent = force ? '小红书：状态不明，建议重新登录' : '小红书：状态未知';
         statusEl.style.color = 'var(--muted)';
+        statusEl.title = data.message || data.reason || '';
       }
     } catch (e) {
-      if (cachedOk) {
+      if (!force && cachedOk) {
         statusEl.textContent = '小红书：本机会话可用';
         statusEl.style.color = 'var(--ok)';
+        statusEl.title = e.message || '';
       } else {
-        statusEl.textContent = '小红书：状态未知';
-        statusEl.style.color = 'var(--muted)';
+        statusEl.textContent = '小红书：检测失败';
+        statusEl.style.color = 'var(--err)';
+        statusEl.title = e.message || '';
       }
     }
+    if (channelsEl) {
+      try {
+        const resp = await fetch('/api/channels/browser/status');
+        const data = await resp.json();
+        if (data.logged_in) {
+          channelsEl.textContent = '视频号：会话就绪';
+          channelsEl.style.color = 'var(--ok)';
+        } else {
+          channelsEl.textContent = '视频号：API 模式（可无登录）';
+          channelsEl.style.color = 'var(--muted)';
+        }
+        channelsEl.title = data.message || '';
+      } catch (e) {
+        channelsEl.textContent = '视频号：状态未知';
+        channelsEl.style.color = 'var(--muted)';
+        channelsEl.title = e.message || '';
+      }
+    }
+    if (checkedEl) checkedEl.textContent = _fmtCheckedAt(checkedAt);
   }
 
   async function triggerXhsLogin(ev) {
@@ -1314,6 +1357,39 @@
       ]),
     ]));
     loadLlmSettings();
+    corpusBody.appendChild(el('div', {
+      style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;',
+    }, [
+      el('span', { class: 'hint', style: 'margin:0;' }, ['语料搜索：']),
+      el('input', {
+        id: 'intelCorpusSearch',
+        placeholder: '搜标题 / 正文 / OCR / 脚本',
+        style: inputStyle('260px'),
+        onkeydown: (ev) => {
+          if (ev.key === 'Enter') runCorpusSearch();
+        },
+      }),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => runCorpusSearch(),
+      }, ['搜索']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: async () => {
+          try {
+            const r = await api('/corpus/sync', { method: 'POST', body: '{}' });
+            const note = document.getElementById('intelCorpusSearchNote');
+            if (note) note.textContent = `已同步 ${r.synced || 0} 条 · 库内 ${r.total || 0}`;
+          } catch (e) {
+            alert(`同步失败：${e.message}`);
+          }
+        },
+      }, ['同步语料库']),
+      el('span', { id: 'intelCorpusSearchNote', class: 'hint', style: 'margin:0;' }, []),
+    ]));
+    corpusBody.appendChild(el('div', { id: 'intelCorpusSearchResults', style: 'margin-bottom:10px;' }, []));
     corpusBody.appendChild(el('div', { id: 'intelCorpusAnalysis' }, [
       el('p', { class: 'hint' }, ['加载中…']),
     ]));
@@ -1407,9 +1483,62 @@
       if (creativeBrief) query.set('brief', creativeBrief);
       const data = await api(`/corpus/analysis?${query.toString()}`);
       renderCorpusAnalysis(container, data);
+      const note = document.getElementById('intelCorpusNote');
+      if (note && data.corpus_sync) {
+        note.textContent = `语料库 ${data.corpus_sync.total || 0} 条`;
+      }
     } catch (e) {
       container.innerHTML = '';
       container.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`语料分析失败：${e.message}`]));
+    }
+  }
+
+  async function runCorpusSearch() {
+    const box = document.getElementById('intelCorpusSearchResults');
+    const note = document.getElementById('intelCorpusSearchNote');
+    const input = document.getElementById('intelCorpusSearch');
+    const topicId = document.getElementById('intelMiningTopic')?.value || '';
+    if (!box) return;
+    const q = input?.value.trim() || '';
+    if (!q) {
+      box.innerHTML = '';
+      if (note) note.textContent = '输入关键词后搜索';
+      return;
+    }
+    if (note) note.textContent = '搜索中…';
+    try {
+      const query = new URLSearchParams({ q, limit: '20' });
+      if (topicId) query.set('topic_id', topicId);
+      const data = await api(`/corpus/search?${query.toString()}`);
+      box.innerHTML = '';
+      if (note) note.textContent = `命中 ${data.total || 0} 条`;
+      if (!(data.items || []).length) {
+        box.appendChild(el('p', { class: 'hint', style: 'margin:0;' }, ['没有匹配语料。']));
+        return;
+      }
+      (data.items || []).slice(0, 12).forEach((item) => {
+        box.appendChild(el('div', {
+          style: 'padding:8px 0;border-bottom:1px dashed var(--border);font-size:12.5px;',
+        }, [
+          el('div', { style: 'display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;' }, [
+            item.url
+              ? el('a', { href: item.url, target: '_blank', rel: 'noopener', style: 'font-weight:700;color:var(--accent);' }, [item.title])
+              : el('span', { style: 'font-weight:700;' }, [item.title]),
+            el('span', { class: 'hint', style: 'margin:0;' }, [
+              `${item.platform || ''} · ${item.note_type || ''} · 赞 ${fmtNum(item.liked_count || 0)}`
+              + (item.has_ocr ? ' · OCR' : '')
+              + (item.has_script ? ' · 脚本' : ''),
+            ]),
+          ]),
+          item.desc_preview
+            ? el('div', { class: 'hint', style: 'margin:4px 0 0;line-height:1.45;' }, [item.desc_preview])
+            : null,
+        ]));
+      });
+    } catch (e) {
+      box.innerHTML = '';
+      if (note) note.textContent = '';
+      box.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`搜索失败：${e.message}`]));
     }
   }
 
@@ -1826,16 +1955,85 @@
         disabled: savedTitles.has(topic.title) ? 'disabled' : undefined,
         onclick: () => saveCreativeTopic(topic.title, data.topic_id || '', data.batch || 0, saveButton),
       }, [savedTitles.has(topic.title) ? '已保存' : '保存']);
+      const regenButton = el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => {
+          const briefEl = document.getElementById('intelCreativeBrief');
+          const seed = [
+            topic.title,
+            topic.angle_name ? `维度：${topic.angle_name}` : '',
+            topic.angle || '',
+          ].filter(Boolean).join('；');
+          if (briefEl) briefEl.value = seed.slice(0, 120);
+          creativeBrief = (briefEl?.value || seed).trim();
+          corpusBatch = 0;
+          loadCorpusAnalysis();
+        },
+      }, ['据此再生成']);
+      const evidence = (topic.evidence || []).filter((ev) => ev && (ev.title || ev.url));
+      const detailKids = [
+        topic.angle
+          ? el('div', { style: 'margin:4px 0;' }, [
+            el('span', { style: 'font-weight:600;' }, ['切入：']),
+            topic.angle,
+          ])
+          : null,
+        topic.structure
+          ? el('div', { style: 'margin:4px 0;' }, [
+            el('span', { style: 'font-weight:600;' }, ['写法：']),
+            topic.structure,
+          ])
+          : null,
+        topic.why_viral
+          ? el('div', { style: 'margin:4px 0;' }, [
+            el('span', { style: 'font-weight:600;' }, ['为什么会爆：']),
+            topic.why_viral,
+          ])
+          : null,
+      ].filter(Boolean);
+      if (evidence.length) {
+        const evList = el('div', { style: 'margin-top:6px;' }, [
+          el('div', { style: 'font-weight:600;margin-bottom:2px;' }, ['依据爆款']),
+        ]);
+        evidence.slice(0, 3).forEach((ev) => {
+          evList.appendChild(el('div', { style: 'padding:2px 0;' }, [
+            ev.url
+              ? el('a', { href: ev.url, target: '_blank', rel: 'noopener' }, [ev.title || ev.url])
+              : el('span', {}, [ev.title || '']),
+            ev.liked_count
+              ? el('span', { class: 'hint', style: 'margin-left:6px;' }, [`赞 ${fmtNum(ev.liked_count)}`])
+              : null,
+          ]));
+        });
+        detailKids.push(evList);
+      }
       suggestions.appendChild(el('div', {
-        style: 'display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px dashed var(--border);',
+        style: 'padding:8px 0;border-bottom:1px dashed var(--border);',
       }, [
-        el('div', { style: 'flex:1;min-width:0;' }, [
-          el('div', { style: 'font-size:13px;font-weight:700;line-height:1.4;' }, [`${topic.index}. ${topic.title}`]),
-          topic.angle_name
-            ? el('div', { class: 'hint', style: 'font-size:11px;margin-top:2px;' }, [`↓ ${topic.angle_name}`])
-            : null,
+        el('div', {
+          style: 'display:flex;align-items:flex-start;gap:8px;',
+        }, [
+          el('div', { style: 'flex:1;min-width:0;' }, [
+            el('div', { style: 'font-size:13px;font-weight:700;line-height:1.4;' }, [`${topic.index}. ${topic.title}`]),
+            topic.angle_name
+              ? el('div', { class: 'hint', style: 'font-size:11px;margin-top:2px;' }, [`↓ ${topic.angle_name}`])
+              : null,
+          ]),
+          el('div', { style: 'display:flex;gap:6px;flex-shrink:0;' }, [regenButton, saveButton]),
         ]),
-        saveButton,
+        detailKids.length
+          ? el('details', { style: 'margin-top:6px;' }, [
+            el('summary', {
+              class: 'hint',
+              style: 'cursor:pointer;font-size:11.5px;font-weight:600;',
+            }, ['展开依据与写法']),
+            el('div', {
+              class: 'hint',
+              style: 'margin-top:6px;line-height:1.5;font-size:12px;',
+            }, detailKids),
+          ])
+          : null,
       ]));
     });
     if (!latestSuggestedTopics.length) {
