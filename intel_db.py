@@ -117,6 +117,17 @@ CREATE TABLE IF NOT EXISTS keyword_suggestions (
   UNIQUE(platform, keyword)
 );
 CREATE INDEX IF NOT EXISTS idx_keyword_suggestions_hit ON keyword_suggestions(hit_count DESC);
+
+CREATE TABLE IF NOT EXISTS saved_creative_topics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  source_topic_id TEXT DEFAULT '',
+  source_batch INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE(title, source_topic_id)
+);
+CREATE INDEX IF NOT EXISTS idx_saved_creative_topics_created
+ON saved_creative_topics(created_at DESC);
 """
 
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta
+from math import ceil
+from pathlib import Path
 from typing import Any
 
 from core.metrics import parse_count
@@ -24,10 +26,124 @@ from core.pipeline import run_discover
 from intel_db import get_conn, now_str
 
 DEFAULT_LIMIT_PER_RUN = 20
+MAX_COLLECTION_DEPTH = 200
+DISCOVER_ROUND_LIMIT = 50
+XHS_SORT_POOL = ["综合", "最新", "最多点赞", "最多评论", "最多收藏"]
+MEDIA_ROOT = Path(__file__).resolve().parent / "output" / "media"
 
 
 def hot_score(liked: int, collected: int, comment: int, share: int, view: int = 0) -> float:
     return round(liked * 1.0 + collected * 1.5 + comment * 2.0 + share * 2.5 + view * 0.02, 2)
+
+
+def _prefer_local_cover(item: dict[str, Any]) -> dict[str, Any]:
+    feed_id = str(item.get("feed_id") or "").strip()
+    if not feed_id:
+        return item
+    media_dir = MEDIA_ROOT / Path(feed_id).name
+    candidates = sorted(media_dir.glob("img_01.*")) if media_dir.is_dir() else []
+    if candidates:
+        item["cover_url"] = f"/api/media/{Path(feed_id).name}/{candidates[0].name}"
+        item["cover_cached"] = True
+    return item
+
+
+def _transcription_lookup() -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    from result_store import load_results
+
+    by_url: dict[str, dict[str, Any]] = {}
+    by_feed: dict[str, dict[str, Any]] = {}
+    for result in load_results():
+        if result.get("url"):
+            by_url[str(result["url"])] = result
+        if result.get("feed_id"):
+            by_feed[str(result["feed_id"])] = result
+    return by_url, by_feed
+
+
+def _transcription_kind(result: dict[str, Any], note_type: str) -> str:
+    if result.get("video_script"):
+        return "视频脚本"
+    if result.get("image_ocr_text"):
+        return "图片 OCR"
+    if note_type == "视频" or str(result.get("note_type") or "") == "视频":
+        return "视频脚本"
+    if note_type == "图文" or str(result.get("note_type") or "") == "图文":
+        return "图片 OCR"
+    return "正文"
+
+
+def _transcription_progress(result: dict[str, Any], note_type: str) -> dict[str, str] | None:
+    resolved_type = note_type or str(result.get("note_type") or "")
+    if resolved_type == "视频":
+        script_status = str(result.get("video_script_status") or "none")
+        if script_status == "pending":
+            return {"stage": "running", "label": "视频脚本转写中…", "kind": "视频脚本"}
+        if script_status == "failed":
+            return {"stage": "failed", "label": "脚本转写失败", "kind": "视频脚本"}
+    elif resolved_type == "图文":
+        ocr_status = str(result.get("image_ocr_status") or "none")
+        if ocr_status == "pending":
+            return {"stage": "running", "label": "图片 OCR 中…", "kind": "图片 OCR"}
+        if ocr_status == "failed":
+            return {"stage": "failed", "label": "OCR 失败", "kind": "图片 OCR"}
+    return None
+
+
+def _attach_transcription(
+    item: dict[str, Any],
+    by_url: dict[str, dict[str, Any]],
+    by_feed: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    result = by_feed.get(str(item.get("feed_id") or "")) or by_url.get(str(item.get("url") or ""))
+    if not result:
+        item["transcription"] = None
+        return item
+    note_type = str(item.get("note_type") or result.get("note_type") or "")
+    progress = _transcription_progress(result, note_type)
+    transcript = str(
+        result.get("video_script")
+        or result.get("image_ocr_text")
+        or result.get("desc")
+        or ""
+    ).strip()
+    kind = _transcription_kind(result, note_type)
+    status = str(result.get("status") or "")
+    if progress:
+        display_status = progress["stage"]
+    elif transcript:
+        display_status = "completed" if status == "成功" else status
+    else:
+        display_status = "none"
+    item["transcription"] = {
+        "status": display_status,
+        "kind": kind,
+        "text": transcript[:1600],
+        "truncated": len(transcript) > 1600,
+        "has_script": bool(result.get("video_script")),
+        "has_ocr": bool(result.get("image_ocr_text")),
+        "progress": progress,
+    }
+    return item
+
+
+def _cache_discovered_cover(feed_id: str, cover_url: str) -> str:
+    clean_feed_id = Path(feed_id).name if feed_id else ""
+    if not clean_feed_id or not cover_url:
+        return cover_url
+    media_dir = MEDIA_ROOT / clean_feed_id
+    existing = sorted(media_dir.glob("img_01.*")) if media_dir.is_dir() else []
+    if existing:
+        return f"/api/media/{clean_feed_id}/{existing[0].name}"
+    try:
+        from image_cache import cache_note_images
+
+        paths = cache_note_images(clean_feed_id, [cover_url])
+    except Exception:
+        paths = []
+    if not paths:
+        return cover_url
+    return f"/api/media/{clean_feed_id}/{Path(paths[0]).name}"
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +205,7 @@ def create_watch_topic(
             json.dumps(platforms or ["xhs"], ensure_ascii=False),
             json.dumps(keywords or [], ensure_ascii=False),
             json.dumps(filters or {}, ensure_ascii=False),
-            max(1, min(50, int(limit_per_run or DEFAULT_LIMIT_PER_RUN))),
+            max(1, min(MAX_COLLECTION_DEPTH, int(limit_per_run or DEFAULT_LIMIT_PER_RUN))),
             max(15, int(interval_minutes or 360)),
             1 if enabled else 0,
             now,
@@ -111,7 +227,12 @@ def update_watch_topic(topic_id: str, **fields: Any) -> dict[str, Any] | None:
     for key in simple_fields:
         if key in fields and fields[key] is not None:
             sets.append(f"{key}=?")
-            params.append(fields[key])
+            value = fields[key]
+            if key == "limit_per_run":
+                value = max(1, min(MAX_COLLECTION_DEPTH, int(value)))
+            elif key == "interval_minutes":
+                value = max(15, int(value))
+            params.append(value)
     if "enabled" in fields and fields["enabled"] is not None:
         sets.append("enabled=?")
         params.append(1 if fields["enabled"] else 0)
@@ -187,10 +308,8 @@ def upsert_intel_item(
     row = conn.execute("SELECT id FROM intel_items WHERE dedupe_key=?", (dedupe_key,)).fetchone()
     if row:
         item_id = int(row["id"])
-        # First-attribution: keep the topic/keyword that originally surfaced this note even if a
-        # different topic's keyword also matches it later (overlapping topics are common). This
-        # keeps per-topic counts stable and avoids orphaning the item if that *other* topic gets
-        # deleted afterwards.
+        # Keep first topic attribution, but allow that same topic to move from legacy
+        # per-keyword searches to an explicit combined-query marker.
         conn.execute(
             """UPDATE intel_items SET
                  title=COALESCE(NULLIF(?, ''), title),
@@ -201,12 +320,16 @@ def upsert_intel_item(
                  liked_count=?, collected_count=?, comment_count=?, share_count=?, view_count=?,
                  hot_score=?, last_seen_at=?,
                  watch_topic_id=COALESCE(watch_topic_id, ?),
-                 keyword=COALESCE(NULLIF(keyword, ''), ?)
+                 keyword=CASE
+                   WHEN watch_topic_id IS NULL OR watch_topic_id=?
+                   THEN COALESCE(NULLIF(?, ''), keyword)
+                   ELSE keyword
+                 END
                WHERE id=?""",
             (
                 title, author, note_type, cover_url, video_url,
                 liked, collected, comment, share, view,
-                score, now, watch_topic_id, keyword, item_id,
+                score, now, watch_topic_id, watch_topic_id, keyword, item_id,
             ),
         )
     else:
@@ -244,32 +367,55 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
     min_collected = int(filters.get("min_collected") or 0)
     min_comments = int(filters.get("min_comments") or 0)
     min_views = int(filters.get("min_views") or 0)
-    limit_per_run = int(topic.get("limit_per_run") or DEFAULT_LIMIT_PER_RUN)
+    target_depth = max(
+        1,
+        min(MAX_COLLECTION_DEPTH, int(topic.get("limit_per_run") or DEFAULT_LIMIT_PER_RUN)),
+    )
 
     # 多轮采集：同一个关键词换不同排序方式（综合/最新/最多点赞…）各搜一遍。
     # 小红书搜索接口本身不支持翻页，这是在"围绕已有选题多次搜索爆款"上唯一能
     # 扩大覆盖面的办法——不同排序会把不同的爆款内容排到前面。
     sort_rounds = [str(s).strip() for s in (filters.get("sort_rounds") or []) if str(s).strip()]
     if not sort_rounds:
-        sort_rounds = [str(filters.get("sort_by") or "").strip()]  # 单轮，兼容旧选题
+        sort_rounds = [str(filters.get("sort_by") or "综合").strip()]  # 兼容旧选题
+    sort_rounds = list(dict.fromkeys(s for s in sort_rounds if s in XHS_SORT_POOL))
+    required_rounds = min(len(XHS_SORT_POOL), max(1, ceil(target_depth / DISCOVER_ROUND_LIMIT)))
+    for candidate in XHS_SORT_POOL:
+        if len(sort_rounds) >= required_rounds:
+            break
+        if candidate not in sort_rounds:
+            sort_rounds.append(candidate)
     note_type_filter = filters.get("note_type") or None
     account = filters.get("account") or None
+    topic_keywords = [str(word).strip() for word in (topic.get("keywords") or []) if str(word).strip()]
+    search_mode = str(filters.get("search_mode") or "combined")
+    if search_mode == "combined" and len(topic_keywords) > 1:
+        search_queries = [(" ".join(topic_keywords), topic_keywords)]
+    else:
+        search_queries = [(word, [word]) for word in topic_keywords]
 
     added = 0
     updated = 0
     rounds_run = 0
+    discovered = 0
+    eligible = 0
+    duplicates = 0
     errors: list[str] = []
     notes: list[str] = []
     seen_keys: set[str] = set()
 
     for platform in topic.get("platforms") or ["xhs"]:
         source_id = "xhs_search_keyword" if platform == "xhs" else "channels_search_keyword"
-        for keyword in topic.get("keywords") or []:
+        for keyword, query_keywords in search_queries:
             keyword = str(keyword).strip()
             if not keyword:
                 continue
             rounds = sort_rounds if platform == "xhs" else [""]
+            keyword_eligible = 0
             for sort_by in rounds:
+                if keyword_eligible >= target_depth:
+                    break
+                round_limit = min(DISCOVER_ROUND_LIMIT, target_depth - keyword_eligible)
                 extra = (
                     {
                         k: v
@@ -277,6 +423,10 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                             "sort_by": sort_by or None,
                             "note_type": note_type_filter,
                             "account": account,
+                            "min_liked": min_liked or None,
+                            "min_collected": min_collected or None,
+                            "min_comments": min_comments or None,
+                            "min_views": min_views or None,
                         }.items()
                         if v
                     }
@@ -284,13 +434,17 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                     else {}
                 )
                 try:
-                    payload = run_discover(source_id, keyword=keyword, limit=limit_per_run, extra=extra)
+                    payload = run_discover(source_id, keyword=keyword, limit=round_limit, extra=extra)
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"[{platform}/{keyword}/{sort_by or '默认'}] discover 失败: {exc}")
                     continue
                 rounds_run += 1
 
                 items = payload.get("items") or []
+                meta_payload = payload.get("meta") or {}
+                discovered += int(meta_payload.get("raw_count") or len(items))
+                eligible += len(items)
+                keyword_eligible += len(items)
                 if not items and payload.get("message"):
                     # 发现源本身返回了提示（如「小红书未登录」），这类信息比"新增0条"
                     # 更能说明问题，必须透传给用户，而不是被静默吞掉。
@@ -309,6 +463,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                     try:
                         if platform == "xhs":
                             feed_id = str(meta.get("feed_id") or "")
+                            cover_url = _cache_discovered_cover(feed_id, str(meta.get("cover_url") or ""))
                             liked = parse_count(meta.get("liked_count"))
                             collected = parse_count(meta.get("collected_count"))
                             comment = parse_count(meta.get("comment_count"))
@@ -324,6 +479,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                                 continue
                             key = f"xhs:{feed_id or item_url}"
                             if key in seen_keys:
+                                duplicates += 1
                                 continue
                             seen_keys.add(key)
                             is_new = _dedupe_missing("xhs", feed_id, item_url)
@@ -334,14 +490,14 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                                 title=item_title,
                                 author=str(meta.get("author") or ""),
                                 note_type=str(meta.get("note_type") or ""),
-                                cover_url=str(meta.get("cover_url") or ""),
+                                cover_url=cover_url,
                                 liked=liked,
                                 collected=collected,
                                 comment=comment,
                                 share=share,
                                 view=view,
                                 watch_topic_id=topic_id,
-                                keyword=keyword,
+                                keyword=" × ".join(query_keywords),
                             )
                         else:
                             from channels.fetch import extract_one as channels_extract_one
@@ -349,6 +505,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                             feed_id = str(meta.get("feed_id") or "")
                             key = f"channels:{feed_id or item_url}"
                             if key in seen_keys:
+                                duplicates += 1
                                 continue
                             seen_keys.add(key)
                             try:
@@ -386,7 +543,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                                 comment=comment,
                                 share=share,
                                 watch_topic_id=topic_id,
-                                keyword=keyword,
+                                keyword=" × ".join(query_keywords),
                             )
 
                         if is_new:
@@ -396,7 +553,12 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                     except Exception as exc:  # noqa: BLE001
                         errors.append(f"[{platform}/{keyword}] 处理失败: {exc}")
 
-    message = f"新增 {added} 条，更新 {updated} 条（共 {rounds_run} 轮搜索）"
+    message = (
+        f"候选 {discovered} 条，阈值后 {eligible} 条，去重 {duplicates} 条；"
+        f"新增 {added} 条，更新 {updated} 条（目标深度 {target_depth}，共 {rounds_run} 轮）"
+    )
+    if search_mode == "combined" and len(topic_keywords) > 1:
+        message = f"组合检索「{' × '.join(topic_keywords)}」；{message}"
     if errors:
         message += f"；{len(errors)} 个错误：{errors[0]}"
     elif notes:
@@ -413,6 +575,13 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
         "topic_id": topic_id,
         "added": added,
         "updated": updated,
+        "stats": {
+            "target_depth": target_depth,
+            "discovered": discovered,
+            "eligible": eligible,
+            "duplicates": duplicates,
+            "rounds_run": rounds_run,
+        },
         "errors": errors[:10],
         "notes": notes[:10],
         "message": message,
@@ -471,36 +640,87 @@ def list_topic_items(
     topic_id: str,
     *,
     platform: str | None = None,
+    sort_by: str = "value",
+    note_type: str | None = None,
+    min_liked: int = 0,
+    min_collected: int = 0,
+    min_comments: int = 0,
+    keyword: str | None = None,
     page: int = 1,
     page_size: int = 10,
 ) -> dict[str, Any]:
     """Paginated viral items scoped to a single watch topic."""
     from intel_product import enrich_item
 
-    if not get_watch_topic(topic_id):
+    topic = get_watch_topic(topic_id)
+    if not topic:
         raise ValueError("选题不存在")
     conn = get_conn()
     where = ["watch_topic_id=?"]
     params: list[Any] = [topic_id]
+    topic_keywords = [str(word).strip() for word in (topic.get("keywords") or []) if str(word).strip()]
+    if (topic.get("filters") or {}).get("search_mode", "combined") == "combined" and len(topic_keywords) > 1:
+        where.append("keyword=?")
+        params.append(" × ".join(topic_keywords))
     if platform:
         where.append("platform=?")
         params.append(platform)
+    if note_type:
+        where.append("note_type=?")
+        params.append(note_type)
+    if min_liked > 0:
+        where.append("liked_count>=?")
+        params.append(int(min_liked))
+    if min_collected > 0:
+        where.append("collected_count>=?")
+        params.append(int(min_collected))
+    if min_comments > 0:
+        where.append("comment_count>=?")
+        params.append(int(min_comments))
+    if keyword:
+        where.append("(title LIKE ? OR keyword LIKE ?)")
+        pattern = f"%{keyword.strip()}%"
+        params.extend([pattern, pattern])
     clause = "WHERE " + " AND ".join(where)
     page = max(1, int(page or 1))
     page_size = max(1, min(50, int(page_size or 10)))
     offset = (page - 1) * page_size
     total = int(conn.execute(f"SELECT COUNT(*) AS c FROM intel_items {clause}", params).fetchone()["c"])
+    order_params: list[Any] = []
+    order_sql = {
+        "liked": "liked_count DESC, hot_score DESC",
+        "collected": "collected_count DESC, hot_score DESC",
+        "comments": "comment_count DESC, hot_score DESC",
+        "recent": "first_seen_at DESC, hot_score DESC",
+    }.get(sort_by, "hot_score DESC")
+    if sort_by == "relevance":
+        topic_keywords = [str(k).strip() for k in topic.get("keywords") or [] if str(k).strip()]
+        if topic_keywords:
+            score_parts = []
+            for topic_keyword in topic_keywords[:10]:
+                score_parts.append("(CASE WHEN title LIKE ? THEN 2 ELSE 0 END)")
+                order_params.append(f"%{topic_keyword}%")
+            order_sql = f"({' + '.join(score_parts)}) DESC, hot_score DESC"
     rows = conn.execute(
-        f"SELECT * FROM intel_items {clause} ORDER BY hot_score DESC LIMIT ? OFFSET ?",
-        [*params, page_size, offset],
+        f"SELECT * FROM intel_items {clause} ORDER BY {order_sql} LIMIT ? OFFSET ?",
+        [*params, *order_params, page_size, offset],
     ).fetchall()
     total_pages = (total + page_size - 1) // page_size if total else 0
+    transcription_by_url, transcription_by_feed = _transcription_lookup()
     return {
-        "items": [enrich_item(dict(r)) for r in rows],
+        "items": [
+            _attach_transcription(
+                _prefer_local_cover(enrich_item(dict(row))),
+                transcription_by_url,
+                transcription_by_feed,
+            )
+            for row in rows
+        ],
         "total": total,
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
+        "sort_by": sort_by,
     }
 
 

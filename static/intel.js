@@ -1,13 +1,24 @@
-/* 内容情报 — 分 Tab：选题建立 / 选题挖掘 / 数据追踪 */
+/* 内容情报 — 轻量能力工作台：爆款采集 / 选题分析 / 数据追踪 */
 (function () {
   const API = '/api/intel';
   const PAGE_SIZE = 10;
+  const XHS_LOGIN_OK_KEY = 'intel_xhs_login_ok';
+  const XHS_LOGIN_AT_KEY = 'intel_xhs_login_at';
   let inited = false;
   let topics = [];
   const topicPages = {};
+  const topicItemFilters = {};
+  const selectedRadarItems = new Map();
+  const transcriptionByUrl = new Map();
+  const topicTranscriptionStatus = new Map();
+  const topicRunResults = new Map();
+  let corpusBatch = 0;
+  let creativeBrief = '';
+  let latestSuggestedTopics = [];
   let currentIntelTab = 'topics';
   let trackedChart = null;
   let selectedTrackedId = null;
+  let transcriptionFloatEl = null;
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -16,9 +27,10 @@
       else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
       else if (v !== undefined && v !== null) node.setAttribute(k, v);
     });
-    (children || []).forEach((c) => {
-      if (c === null || c === undefined) return;
-      node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    const kids = Array.isArray(children) ? children : (children == null ? [] : [children]);
+    kids.forEach((c) => {
+      if (c === null || c === undefined || c === false) return;
+      node.appendChild(typeof c === 'string' || typeof c === 'number' ? document.createTextNode(String(c)) : c);
     });
     return node;
   }
@@ -87,12 +99,235 @@
     });
   }
 
-  function sendToXhsExtract(url) {
-    if (window.AppBridge && typeof window.AppBridge.openXhsExtract === 'function') {
-      window.AppBridge.openXhsExtract(url);
-      return;
+  function proxiedImageUrl(url) {
+    if (!url) return '';
+    if (url.startsWith('/api/media/')) return url;
+    return /^https?:\/\//i.test(url) ? `/api/image-proxy?url=${encodeURIComponent(url)}` : url;
+  }
+
+  function extractedCoverUrl(result) {
+    const localPath = (result?.local_image_paths || [])[0] || '';
+    if (localPath) {
+      const parts = localPath.split('/').filter(Boolean);
+      if (parts.length >= 2) {
+        return `/api/media/${encodeURIComponent(parts[parts.length - 2])}/${encodeURIComponent(parts[parts.length - 1])}`;
+      }
     }
-    window.open(url, '_blank');
+    return proxiedImageUrl((result?.image_urls || [])[0] || '');
+  }
+
+  function transcriptionKindLabel(item, transcription) {
+    const noteType = item.content_type || item.note_type || '';
+    if (noteType === '视频') return '脚本';
+    if (noteType === '图文') return 'OCR';
+    return transcription?.kind || '正文';
+  }
+
+  function transcriptionStatusLabel(item, transcription, result) {
+    const progress = transcription?.progress || item.transcription?.progress;
+    if (progress?.label) return progress.label;
+    const noteType = item.content_type || item.note_type || '';
+    if (result?.video_script_status === 'pending' || (noteType === '视频' && result?.video_script_status === 'pending')) {
+      return '视频脚本转写中…';
+    }
+    if (result?.image_ocr_status === 'pending' || (noteType === '图文' && result?.image_ocr_status === 'pending')) {
+      return '图片 OCR 中…';
+    }
+    if (result?.video_script_status === 'failed') return '脚本转写失败';
+    if (result?.image_ocr_status === 'failed') return 'OCR 失败';
+    if (transcription?.status === 'completed' || item.transcription?.status === 'completed') return '已完成';
+    if (transcription?.status === 'failed') return '转录失败';
+    if (transcription?.status === 'running') return '转录中…';
+    if (item.transcription?.text) return '已完成';
+    return '未转录';
+  }
+
+  function transcriptionProgressPercent(item, transcription, result) {
+    const label = transcriptionStatusLabel(item, transcription, result);
+    if (/已完成|✓/.test(label)) return 100;
+    if (/失败/.test(label)) return 100;
+    if (/转写中|OCR 中|转录中/.test(label)) return 55;
+    if (transcription?.status === 'running') return 35;
+    if (/未转录|待/.test(label)) return 0;
+    return null;
+  }
+
+  function setTopicTranscriptionStatus(topicId, message, tone = 'muted') {
+    topicTranscriptionStatus.set(topicId, { message, tone });
+    const status = document.getElementById(`intelTranscriptionStatus-${topicId}`);
+    if (status) {
+      status.textContent = message;
+      status.style.color = tone === 'ok' ? 'var(--ok)' : (tone === 'error' ? 'var(--err)' : 'var(--muted)');
+    }
+  }
+
+  function findExtractedResult(item, results) {
+    return (results || []).find((result) => {
+      if (result.url && result.url === item.url) return true;
+      return item.feed_id && result.feed_id && String(item.feed_id) === String(result.feed_id);
+    });
+  }
+
+  function showTranscriptionFloat(item, transcription, result) {
+    if (transcriptionFloatEl) transcriptionFloatEl.remove();
+    const text = result?.video_script || result?.image_ocr_text || result?.desc
+      || item.transcription?.text || transcription?.result?.video_script
+      || transcription?.result?.image_ocr_text || transcription?.text || '';
+    const kind = transcriptionKindLabel(item, item.transcription || transcription);
+    const title = item.title || item.url || '转录内容';
+    const len = text.length;
+    const width = len > 1200 ? 'min(520px, 42vw)' : (len > 400 ? 'min(420px, 38vw)' : 'min(340px, 34vw)');
+    const maxHeight = len > 800 ? '72vh' : (len > 300 ? '56vh' : '42vh');
+    transcriptionFloatEl = el('div', {
+      style: 'position:fixed;top:72px;right:18px;bottom:18px;width:' + width + ';max-height:calc(100vh - 90px);z-index:10050;display:flex;flex-direction:column;border:1px solid var(--border);border-radius:14px;background:var(--panel);box-shadow:0 18px 48px rgba(0,0,0,.22);',
+    }, [
+      el('div', {
+        style: 'display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border);',
+      }, [
+        el('div', { style: 'flex:1;min-width:0;' }, [
+          el('div', { style: 'font-size:14px;font-weight:700;line-height:1.35;' }, [title]),
+          el('div', { class: 'hint', style: 'font-size:11.5px;margin-top:4px;' }, [
+            `${kind} · ${transcriptionStatusLabel(item, transcription, result)}`,
+          ]),
+        ]),
+        el('button', {
+          class: 'btn-secondary btn-small',
+          type: 'button',
+          onclick: () => {
+            if (transcriptionFloatEl) {
+              transcriptionFloatEl.remove();
+              transcriptionFloatEl = null;
+            }
+          },
+        }, ['关闭']),
+      ]),
+      el('div', {
+        style: `flex:1;overflow:auto;padding:12px 14px;font-size:12.5px;line-height:1.65;white-space:pre-wrap;max-height:${maxHeight};`,
+      }, [text || '暂无转录内容，请先启动转录。']),
+    ]);
+    document.body.appendChild(transcriptionFloatEl);
+  }
+
+  function renderManualTranscriptionResults(accumulated, requestedUrls = []) {
+    const container = document.getElementById('intelManualResults');
+    if (!container) return;
+    const requested = new Set(requestedUrls);
+    let results = accumulated?.results || [];
+    if (requested.size) {
+      const matched = results.filter((item) => requested.has(item.url));
+      if (matched.length) results = matched;
+    }
+    container.innerHTML = '';
+    results.slice(-10).reverse().forEach((item) => {
+      const cover = extractedCoverUrl(item);
+      const text = item.video_script || item.image_ocr_text || item.desc || '';
+      const card = el('div', {
+        style: 'display:grid;grid-template-columns:48px 1fr;gap:9px;padding:8px 0;border-top:1px solid var(--border);',
+      }, [
+        cover
+          ? el('img', { src: cover, alt: '转录内容封面', style: 'width:48px;height:48px;object-fit:cover;border-radius:7px;' })
+          : el('div', { style: 'width:48px;height:48px;border-radius:7px;background:var(--panel-2);' }, []),
+        el('div', {}, [
+          el('div', { style: 'font-size:12.5px;font-weight:600;' }, [item.title || item.url || '转录内容']),
+          el('div', { class: 'hint', style: 'font-size:11px;margin-top:2px;' }, [
+            `${item.status || '处理中'} · ${item.video_script ? '视频脚本' : (item.image_ocr_text ? '图片 OCR' : '正文')}`,
+          ]),
+          text
+            ? el('button', {
+                class: 'btn-secondary btn-small',
+                type: 'button',
+                style: 'margin-top:4px;font-size:11px;',
+                onclick: () => showTranscriptionFloat({ title: item.title, url: item.url, content_type: item.note_type }, null, item),
+              }, ['查看转录'])
+            : el('span', { class: 'hint', style: 'font-size:11px;' }, ['结果生成中…']),
+        ]),
+      ]);
+      container.appendChild(card);
+    });
+  }
+
+  async function pollManualTranscription(platform, taskId, requestedUrls) {
+    try {
+      const endpoint = platform === 'channels'
+        ? '/api/channels/tasks/current'
+        : `/api/tasks/${encodeURIComponent(taskId)}`;
+      if (platform !== 'channels' && !taskId) return;
+      const resp = await fetch(endpoint);
+      if (!resp.ok) throw new Error(`状态查询失败 (${resp.status})`);
+      const data = await resp.json();
+      if (data.accumulated) renderManualTranscriptionResults(data.accumulated, requestedUrls);
+      const task = data.task || {};
+      const pending = Number(data.accumulated?.pending_transcriptions || 0)
+        + Number(data.accumulated?.pending_ocr || 0);
+      if (!['completed', 'cancelled', 'failed'].includes(task.status) || pending > 0) {
+        window.setTimeout(() => pollManualTranscription(platform, taskId, requestedUrls), 1500);
+        return;
+      }
+      const msg = document.getElementById('intelManualExtractMsg');
+      if (msg) {
+        msg.textContent = task.status === 'failed' ? `转录失败：${task.message || '任务失败'}` : '转录完成，结果已显示在下方。';
+        msg.style.color = task.status === 'failed' ? 'var(--err)' : 'var(--ok)';
+      }
+    } catch (e) {
+      const msg = document.getElementById('intelManualExtractMsg');
+      if (msg) {
+        msg.textContent = e.message;
+        msg.style.color = 'var(--err)';
+      }
+    }
+  }
+
+  async function pollInlineTranscription(topicId, taskId, selected) {
+    try {
+      const data = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`).then(async (resp) => {
+        if (!resp.ok) throw new Error(`状态查询失败 (${resp.status})`);
+        return resp.json();
+      });
+      const task = data.task || {};
+      const results = data.accumulated?.results || [];
+      const pendingOcr = Number(data.accumulated?.pending_ocr || 0);
+      const pendingScript = results.filter((r) => r.video_script_status === 'pending').length;
+      const completedCount = selected.filter((item) => findExtractedResult(item, results)?.status === '成功').length;
+      selected.forEach((item) => {
+        const result = findExtractedResult(item, results);
+        const noteType = item.content_type || item.note_type || '';
+        let status = 'running';
+        if (result?.status === '成功' && (result.video_script || result.image_ocr_text || result.desc)) {
+          status = 'completed';
+        } else if (task.status === 'failed') {
+          status = 'failed';
+        }
+        transcriptionByUrl.set(item.url, { status, result });
+      });
+      setTopicTranscriptionStatus(
+        topicId,
+        `转录进度 ${completedCount}/${selected.length} · OCR 待处理 ${pendingOcr} · 脚本待处理 ${pendingScript}`,
+      );
+      loadTopicItems(topicId, topicPages[topicId] || 1);
+      if (!['completed', 'cancelled', 'failed'].includes(task.status) || pendingOcr > 0 || pendingScript > 0) {
+        window.setTimeout(() => pollInlineTranscription(topicId, taskId, selected), 1500);
+        return;
+      }
+      Array.from(selectedRadarItems.entries()).forEach(([key, item]) => {
+        if (item.topicId === topicId) selectedRadarItems.delete(key);
+      });
+      setTopicTranscriptionStatus(
+        topicId,
+        task.status === 'failed'
+          ? `转录失败：${task.message || (task.errors || []).join('；') || '任务执行失败'}`
+          : `已完成 ${completedCount} 条转录，封面与状态已原位更新`,
+        task.status === 'failed' ? 'error' : 'ok',
+      );
+      loadTopicItems(topicId, topicPages[topicId] || 1);
+    } catch (e) {
+      setTopicTranscriptionStatus(topicId, e.message, 'error');
+    }
+  }
+
+  function transcribeSingleItem(topicId, item) {
+    selectedRadarItems.set(`${topicId}:${item.url}`, { ...item, topicId });
+    updateSelectionBar(topicId);
+    startSelectedTranscription(topicId);
   }
 
   // ---------------------------------------------------------------------
@@ -112,7 +347,6 @@
     renderTrackedTab();
     switchIntelTab('topics');
     refreshLoginStatus();
-    maybeShowOnboarding();
   }
 
   function renderIntelSubTabs() {
@@ -121,9 +355,9 @@
       style: 'display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap;',
     });
     [
-      ['topics', '选题建立'],
-      ['mining', '选题挖掘'],
-      ['tracked', '数据追踪'],
+      ['topics', '1 获取选题与依据'],
+      ['mining', '2 转录与选题分析'],
+      ['tracked', '3 数据追踪'],
     ].forEach(([id, label]) => {
       bar.appendChild(
         el('button', {
@@ -146,10 +380,14 @@
     document.getElementById('intelTabMining').hidden = tab !== 'mining';
     document.getElementById('intelTabTracked').hidden = tab !== 'tracked';
     if (tab === 'mining') {
+      loadCorpusAnalysis();
       loadMiningInsights();
       loadBenchmark();
     }
-    if (tab === 'tracked') loadTracked();
+    if (tab === 'tracked') {
+      loadTrackedCorpusSummary();
+      loadTracked();
+    }
   }
 
   function renderStatusBar() {
@@ -159,7 +397,7 @@
       el('span', { id: 'intelXhsStatus', class: 'hint', style: 'margin:0;' }, ['小红书：检测中…']),
       el('button', { class: 'btn-secondary btn-small', id: 'intelXhsLoginBtn', onclick: triggerXhsLogin }, ['登录小红书']),
       el('span', { class: 'hint', style: 'margin:0;flex:1 1 200px;' }, [
-        '选题爆款默认折叠；切换上方 Tab 使用不同功能，无需长页面向下翻。',
+        '先获取有数据依据的候选内容，再勾选需要转录的样本。',
       ]),
     ]);
   }
@@ -167,19 +405,35 @@
   async function refreshLoginStatus() {
     const statusEl = document.getElementById('intelXhsStatus');
     if (!statusEl) return;
+    const cachedOk = sessionStorage.getItem(XHS_LOGIN_OK_KEY) === '1';
     try {
       const resp = await fetch('/api/xhs/login-status');
       const data = await resp.json();
-      if (data.logged_in) {
+      if (data.logged_in === true) {
+        sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
+        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
         statusEl.textContent = '小红书：✅ 已登录';
         statusEl.style.color = 'var(--ok)';
-      } else {
-        statusEl.textContent = '小红书：未登录';
+      } else if (data.logged_in === false && data.reason === 'not_logged_in') {
+        sessionStorage.removeItem(XHS_LOGIN_OK_KEY);
+        sessionStorage.removeItem(XHS_LOGIN_AT_KEY);
+        statusEl.textContent = '小红书：需登录';
         statusEl.style.color = 'var(--err)';
+      } else if (cachedOk || data.session_reusable) {
+        statusEl.textContent = '小红书：本机会话可用';
+        statusEl.style.color = 'var(--ok)';
+      } else {
+        statusEl.textContent = '小红书：状态未知';
+        statusEl.style.color = 'var(--muted)';
       }
     } catch (e) {
-      statusEl.textContent = '小红书：状态未知';
-      statusEl.style.color = 'var(--muted)';
+      if (cachedOk) {
+        statusEl.textContent = '小红书：本机会话可用';
+        statusEl.style.color = 'var(--ok)';
+      } else {
+        statusEl.textContent = '小红书：状态未知';
+        statusEl.style.color = 'var(--muted)';
+      }
     }
   }
 
@@ -193,13 +447,16 @@
       const statusResp = await fetch('/api/xhs/login-status');
       const status = await statusResp.json().catch(() => ({}));
       if (status.logged_in) {
+        sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
+        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
         await refreshLoginStatus();
         return;
       }
       const loginResp = await fetch('/api/xhs/login', { method: 'POST' });
       const r = await loginResp.json().catch(() => ({}));
       if (!loginResp.ok) throw new Error(r.detail || `触发失败 (${loginResp.status})`);
-      alert(r.message || '请在弹出的 Chrome 窗口完成登录');
+      sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
+      sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
       setTimeout(refreshLoginStatus, 2000);
     } catch (e) {
       alert(`登录失败：${e.message}`);
@@ -209,43 +466,43 @@
     }
   }
 
-  function maybeShowOnboarding() {
-    if (localStorage.getItem('intel_onboarded_v112')) return;
-    const overlay = el('div', {
-      style: 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;',
-    });
-    const card = el('div', {
-      style: 'max-width:420px;width:100%;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:20px;',
-    });
-    card.appendChild(el('h3', { style: 'margin:0 0 12px;font-size:18px;' }, ['内容情报怎么用']));
-    [
-      '① 选题建立：创建选题 → 运行 → 展开卡片查看爆款',
-      '② 选题挖掘：看建议词、跨选题对标',
-      '③ 数据追踪：登记已发布链接，查看表现曲线',
-    ].forEach((text) => card.appendChild(el('p', { class: 'hint', style: 'margin:0 0 8px;line-height:1.5;' }, [text])));
-    card.appendChild(
-      el('button', {
-        class: 'btn-primary',
-        style: 'margin-top:8px;width:100%;',
-        onclick: () => {
-          localStorage.setItem('intel_onboarded_v112', '1');
-          overlay.remove();
-        },
-      }, ['知道了'])
-    );
-    overlay.appendChild(card);
-    document.body.appendChild(overlay);
-  }
 
   // ---------------------------------------------------------------------
-  // Tab: 选题建立
+  // Tab: 爆款采集
   // ---------------------------------------------------------------------
+
+  function renderManualTranscriptionSection() {
+    const section = el('section', { class: 'panel', style: 'margin-top:14px' });
+    section.appendChild(el('div', { class: 'panel-head' }, ['链接转录']));
+    const body = el('div', { class: 'panel-body' });
+    body.appendChild(el('p', { class: 'hint', style: 'margin:0 0 8px;' }, [
+      '粘贴未经过采集任务的分享链接。结果会直接显示在这里，并自动进入后续语料分析。',
+    ]));
+    const platform = el('select', { id: 'intelManualPlatform', style: inputStyle('110px') }, [
+      el('option', { value: 'xhs' }, ['小红书']),
+      el('option', { value: 'channels' }, ['视频号']),
+    ]);
+    const links = el('textarea', {
+      id: 'intelManualLinks',
+      placeholder: '每行一个分享链接',
+      style: 'min-height:70px;flex:1 1 420px;',
+    });
+    body.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;' }, [
+      platform,
+      links,
+      el('button', { class: 'btn-primary', onclick: startManualExtraction }, ['提取并转录']),
+    ]));
+    body.appendChild(el('p', { id: 'intelManualExtractMsg', class: 'hint', style: 'margin:8px 0 0;' }, []));
+    body.appendChild(el('div', { id: 'intelManualResults', style: 'margin-top:8px;' }, []));
+    section.appendChild(body);
+    return section;
+  }
 
   function renderTopicsTab() {
     const panel = document.getElementById('intelTabTopics');
     panel.innerHTML = '';
     const section = el('section', { class: 'panel' });
-    section.appendChild(el('div', { class: 'panel-head' }, ['创建选题']));
+    section.appendChild(el('div', { class: 'panel-head' }, ['创建采集任务']));
     const body = el('div', { class: 'panel-body' });
 
     const nameInput = el('input', { id: 'intelTopicName', placeholder: '选题名称', style: inputStyle('160px') });
@@ -257,7 +514,7 @@
         nameInput, kwInput,
         el('label', { class: 'checkbox-row', style: 'margin:0' }, [xhsCheck, ' 小红书']),
         el('label', { class: 'checkbox-row', style: 'margin:0' }, [chCheck, ' 视频号']),
-        el('button', { class: 'btn-primary', onclick: createTopic }, ['创建选题']),
+        el('button', { class: 'btn-primary', onclick: createTopic }, ['创建并保存']),
       ])
     );
 
@@ -274,14 +531,37 @@
     loadSearchTemplates(tplSelect);
 
     const advanced = el('details', { style: 'margin-bottom:10px;' }, [
-      el('summary', { class: 'hint', style: 'cursor:pointer;' }, ['高级选项']),
+      el('summary', { class: 'hint', style: 'cursor:pointer;font-weight:600;' }, ['筛选与采集设置']),
     ]);
-    const advBody = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:8px;' });
-    const limitInput = el('input', { id: 'intelTopicLimit', type: 'number', value: '20', min: '1', max: '50', style: inputStyle('70px') });
+    const advBody = el('div', {
+      style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;padding-top:10px;',
+    });
+    const limitInput = el('input', {
+      id: 'intelTopicLimit',
+      type: 'number',
+      value: '20',
+      min: '1',
+      max: '200',
+      style: inputStyle('82px'),
+    });
     const intervalInput = el('input', { id: 'intelTopicInterval', type: 'number', value: '360', min: '15', style: inputStyle('70px') });
+    const searchModeSelect = el('select', { id: 'intelTopicSearchMode', style: inputStyle('126px') }, [
+      el('option', { value: 'combined' }, ['组合检索']),
+      el('option', { value: 'separate' }, ['分别检索']),
+    ]);
+    const collectionGroup = el('div', {
+      style: 'padding:11px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);',
+    });
+    collectionGroup.appendChild(el('div', { style: 'font-size:12px;font-weight:700;margin-bottom:8px;' }, ['检索设置']));
+    collectionGroup.appendChild(el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;' }, [
+      el('label', { class: 'checkbox-row', style: 'margin:0' }, ['目标条数', limitInput]),
+      el('label', { class: 'checkbox-row', style: 'margin:0' }, ['重复间隔', intervalInput, '分钟']),
+      el('label', { class: 'checkbox-row', style: 'margin:0' }, ['关键词关系', searchModeSelect]),
+    ]));
     const SORT_ROUND_OPTIONS = ['综合', '最新', '最多点赞', '最多评论', '最多收藏'];
+    const sortWrap = el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;' });
     SORT_ROUND_OPTIONS.forEach((label, idx) => {
-      advBody.appendChild(
+      sortWrap.appendChild(
         el('label', { class: 'checkbox-row', style: 'margin:0;font-size:12px;' }, [
           el('input', { type: 'checkbox', class: 'intelTopicSortRound', value: label, checked: idx === 0 ? 'checked' : undefined }),
           ` ${label}`,
@@ -293,18 +573,31 @@
       el('option', { value: '视频' }, ['视频']),
       el('option', { value: '图文' }, ['图文']),
     ]);
-    advBody.appendChild(el('label', { class: 'checkbox-row', style: 'margin:0' }, ['每轮', limitInput, '条']));
-    advBody.appendChild(el('label', { class: 'checkbox-row', style: 'margin:0' }, ['间隔', intervalInput, '分']));
-    advBody.appendChild(noteTypeSelect);
-    ['intelTopicMinLiked', 'intelTopicMinCollected', 'intelTopicMinComments'].forEach((id, i) => {
-      const labels = ['最低赞', '最低藏', '最低评'];
-      advBody.appendChild(
+    collectionGroup.appendChild(el('div', { class: 'hint', style: 'font-size:11px;margin:6px 0 4px;' }, ['排序轮次：多选后按轮次扩大覆盖。']));
+    collectionGroup.appendChild(sortWrap);
+    collectionGroup.appendChild(el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;' }, [
+      el('label', { class: 'checkbox-row', style: 'margin:0' }, ['内容类型', noteTypeSelect]),
+    ]));
+    advBody.appendChild(collectionGroup);
+    const thresholdGroup = el('div', {
+      style: 'padding:11px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);',
+    });
+    thresholdGroup.appendChild(el('div', { style: 'font-size:12px;font-weight:700;margin-bottom:8px;' }, ['内容门槛']));
+    const thresholdWrap = el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap;' });
+    ['intelTopicMinLiked', 'intelTopicMinCollected', 'intelTopicMinComments', 'intelTopicMinViews'].forEach((id, i) => {
+      const labels = ['最低赞', '最低藏', '最低评', '最低浏览'];
+      thresholdWrap.appendChild(
         el('label', { class: 'checkbox-row', style: 'margin:0' }, [
           labels[i],
           el('input', { id, type: 'number', value: '0', min: '0', style: inputStyle('60px') }),
         ])
       );
     });
+    thresholdGroup.appendChild(thresholdWrap);
+    thresholdGroup.appendChild(el('span', { class: 'hint', style: 'margin:8px 0 0;font-size:11px;display:block;' }, [
+      '深度通过不同排序多轮搜索扩大覆盖；平台返回不足时，实际候选数可能低于目标。',
+    ]));
+    advBody.appendChild(thresholdGroup);
     advanced.appendChild(advBody);
     body.appendChild(advanced);
     body.appendChild(el('p', { id: 'intelTopicCreateMsg', class: 'hint', style: 'margin:0 0 12px' }, []));
@@ -313,9 +606,10 @@
     panel.appendChild(section);
 
     const listSection = el('section', { class: 'panel', style: 'margin-top:14px' });
-    listSection.appendChild(el('div', { class: 'panel-head' }, ['我的选题']));
+    listSection.appendChild(el('div', { class: 'panel-head' }, ['已保存的采集任务']));
     listSection.appendChild(el('div', { class: 'panel-body', id: 'intelTopicList' }, [el('p', { class: 'hint' }, ['加载中…'])]));
     panel.appendChild(listSection);
+    panel.appendChild(renderManualTranscriptionSection());
     loadTopics();
   }
 
@@ -347,6 +641,15 @@
     const kwLabel = (t.keywords || []).join('、') || '-';
     const runMsg = t.last_run_message ? `${t.last_run_at || ''} · ${t.last_run_message}` : '尚未运行';
     const count = t.item_count || 0;
+    const filters = t.filters || {};
+    const thresholdParts = [
+      (filters.search_mode || 'combined') === 'combined' && (t.keywords || []).length > 1 ? '组合检索' : '分别检索',
+      filters.note_type || '类型不限',
+      filters.min_liked ? `赞≥${filters.min_liked}` : '',
+      filters.min_collected ? `藏≥${filters.min_collected}` : '',
+      filters.min_comments ? `评≥${filters.min_comments}` : '',
+      filters.min_views ? `浏览≥${filters.min_views}` : '',
+    ].filter(Boolean);
 
     const block = el('div', {
       style: 'margin-bottom:12px;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:var(--panel);',
@@ -358,7 +661,7 @@
         el('div', { style: 'flex:1 1 200px;' }, [
           el('div', { style: 'font-size:16px;font-weight:700;margin-bottom:4px;' }, [t.name]),
           el('div', { class: 'hint', style: 'font-size:12.5px;' }, [
-            `${platformsLabel} · ${kwLabel} · ${t.enabled ? '启用' : '停用'} · 已收录 ${count} 条`,
+            `${platformsLabel} · ${kwLabel} · 抓取 ${t.limit_per_run || 20} 条 · ${thresholdParts.join(' · ')} · 已收录 ${count} 条`,
           ]),
           el('div', {
             class: 'hint',
@@ -368,6 +671,7 @@
         el('div', { style: 'display:flex;gap:6px;flex-wrap:wrap;' }, [
           el('button', { class: 'btn-primary btn-small', onclick: (ev) => runTopicNow(t.id, ev.currentTarget) }, ['运行一次']),
           el('button', { class: 'btn-secondary btn-small', onclick: () => exportTopicPack(t.id, t.name) }, ['导出选题包']),
+          el('button', { class: 'btn-secondary btn-small', onclick: () => exportTopicExcel(t.id, t.name) }, ['导出 Excel']),
           el('button', { class: 'btn-secondary btn-small', onclick: () => toggleDirections(t.id) }, ['选题方向']),
           el('button', { class: 'btn-secondary btn-small', onclick: () => toggleTopic(t) }, [t.enabled ? '停用' : '启用']),
           el('button', { class: 'btn-danger btn-small', onclick: () => deleteTopic(t.id) }, ['删除']),
@@ -375,6 +679,30 @@
       ])
     );
     block.appendChild(head);
+    const runResult = topicRunResults.get(t.id);
+    if (runResult?.stats) {
+      const stats = runResult.stats;
+      const resultBar = el('div', {
+        style: 'display:flex;gap:6px;flex-wrap:wrap;padding:8px 14px;border-top:1px solid var(--border);background:var(--panel);',
+      });
+      [
+        ['候选', stats.discovered, '平台本次返回的原始内容数'],
+        ['通过门槛', stats.eligible, '达到内容类型和互动量要求的内容数'],
+        ['去重', stats.duplicates, '与本轮其他结果重复的内容数'],
+        ['新增', runResult.added, '首次进入当前资料库的内容数'],
+        ['更新', runResult.updated, '已存在且指标被刷新过的内容数'],
+        ['搜索轮次', stats.rounds_run, '实际执行的排序搜索次数'],
+      ].forEach(([label, value, title]) => {
+        resultBar.appendChild(el('span', {
+          title,
+          style: 'padding:3px 7px;border-radius:999px;background:var(--panel-2);font-size:11px;',
+        }, [`${label} ${value || 0}`]));
+      });
+      resultBar.appendChild(el('span', { class: 'hint', style: 'font-size:10.5px;margin:2px 0 0;' }, [
+        '悬浮指标可查看含义',
+      ]));
+      block.appendChild(resultBar);
+    }
 
     const dirsWrap = el('div', {
       id: `intelTopicDirs-${t.id}`,
@@ -426,7 +754,16 @@
     const pagerEl = document.getElementById(`intelTopicPager-${topicId}`);
     if (!itemsEl) return;
     try {
-      const data = await api(`/watch-topics/${topicId}/items?page=${page}&page_size=${PAGE_SIZE}`);
+      const filters = topicItemFilters[topicId] || {};
+      const query = new URLSearchParams({
+        page: String(page),
+        page_size: String(PAGE_SIZE),
+        sort_by: filters.sort_by || 'value',
+      });
+      if (filters.note_type) query.set('note_type', filters.note_type);
+      if (filters.min_liked) query.set('min_liked', String(filters.min_liked));
+      if (filters.keyword) query.set('keyword', filters.keyword);
+      const data = await api(`/watch-topics/${topicId}/items?${query.toString()}`);
       renderTopicItemsTable(itemsEl, data, topicId);
       renderTopicPager(pagerEl, data, topicId);
     } catch (e) {
@@ -439,6 +776,7 @@
   function renderTopicItemsTable(container, data, topicId) {
     container.innerHTML = '';
     const items = data.items || [];
+    container.appendChild(renderTopicItemFilters(topicId, items));
     if (!items.length) {
       container.appendChild(el('p', { class: 'hint' }, ['该选题暂无爆款。']));
       return;
@@ -447,42 +785,251 @@
     table.appendChild(
       el('thead', {}, [
         el('tr', {}, [
+          el('th', { style: 'width:34px;' }, ['选']),
           el('th', { style: 'width:36px;' }, ['#']),
           el('th', { style: 'width:56px;' }, ['封面']),
           el('th', {}, ['标题 / 作者']),
           el('th', { style: 'width:72px;' }, ['内容类型']),
-          el('th', { style: 'min-width:260px;' }, ['转 · 赞 · 评 · 播 · 搜 · 藏']),
+          el('th', { style: 'min-width:220px;' }, ['转 · 赞 · 评 · 播 · 搜 · 藏']),
           el('th', { style: 'width:88px;' }, ['操作']),
+          el('th', { style: 'width:120px;' }, ['转录']),
         ]),
       ])
     );
     const tbody = el('tbody');
     const baseIdx = (data.page - 1) * data.page_size;
     items.forEach((item, idx) => {
-      const coverCell = item.cover_url
-        ? el('img', { src: item.cover_url, style: 'width:44px;height:44px;object-fit:cover;border-radius:6px;' })
+      const itemKey = `${topicId}:${item.url}`;
+      const liveTranscription = transcriptionByUrl.get(item.url);
+      const transcription = liveTranscription || (item.transcription
+        ? { status: item.transcription.status === '成功' ? 'completed' : 'running' }
+        : null);
+      const itemCheck = el('input', {
+        type: 'checkbox',
+        checked: selectedRadarItems.has(itemKey) ? 'checked' : undefined,
+        'aria-label': `选择 ${item.title || item.url}`,
+      });
+      itemCheck.addEventListener('change', () => {
+        if (itemCheck.checked) selectedRadarItems.set(itemKey, { ...item, topicId });
+        else selectedRadarItems.delete(itemKey);
+        updateSelectionBar(topicId);
+      });
+      const coverSource = extractedCoverUrl(transcription?.result) || proxiedImageUrl(item.cover_url);
+      const coverCell = coverSource
+        ? el('img', {
+            src: coverSource,
+            alt: item.title ? `${item.title}封面` : '内容封面',
+            referrerpolicy: 'no-referrer',
+            style: 'width:44px;height:44px;object-fit:cover;border-radius:6px;background:var(--panel-2);',
+            onerror: (event) => {
+              const image = event.currentTarget;
+              image.style.display = 'none';
+              const fallback = image.nextElementSibling;
+              if (fallback) fallback.style.display = 'flex';
+            },
+          })
         : el('div', { style: 'width:44px;height:44px;border-radius:6px;background:var(--panel-2);font-size:10px;display:flex;align-items:center;justify-content:center;color:var(--muted);' }, ['图文']);
+      const coverFallback = coverSource
+        ? el('div', { style: 'display:none;width:44px;height:44px;border-radius:6px;background:var(--panel-2);font-size:10px;align-items:center;justify-content:center;color:var(--muted);' }, ['暂无封面'])
+        : null;
+      const statusLabel = transcriptionStatusLabel(item, liveTranscription || item.transcription, transcription?.result);
+      const progressPct = transcriptionProgressPercent(item, liveTranscription || item.transcription, transcription?.result);
+      const titleNode = item.url
+        ? el('a', {
+            href: item.url,
+            target: '_blank',
+            style: 'font-size:13px;max-width:300px;color:var(--accent);text-decoration:none;display:inline-block;',
+          }, [item.title || '(无标题)'])
+        : el('div', { style: 'font-size:13px;max-width:300px;' }, [item.title || '(无标题)']);
       tbody.appendChild(
         el('tr', {}, [
+          el('td', {}, [itemCheck]),
           el('td', {}, [String(baseIdx + idx + 1)]),
-          el('td', {}, [coverCell]),
+          el('td', {}, [coverCell, coverFallback]),
           el('td', {}, [
-            el('div', { style: 'font-size:13px;max-width:300px;' }, [item.title || '(无标题)']),
+            titleNode,
             el('div', { class: 'hint', style: 'font-size:11.5px;' }, [item.author || '-']),
           ]),
           el('td', { style: 'font-size:11.5px;' }, [item.content_type || '其他']),
           el('td', {}, [renderMetrics(item)]),
-          el('td', { style: 'display:flex;gap:4px;' }, [
-            el('a', { href: item.url, target: '_blank', style: 'color:var(--accent);font-size:12px;' }, ['打开']),
+          el('td', {}, [
             item.platform === 'xhs'
-              ? el('button', { class: 'btn-secondary btn-small', style: 'font-size:11px;padding:2px 6px;', onclick: () => sendToXhsExtract(item.url) }, ['提取'])
+              ? el('button', {
+                  class: 'btn-secondary btn-small',
+                  style: 'font-size:11px;padding:2px 6px;',
+                  onclick: () => transcribeSingleItem(topicId, item),
+                }, ['转录'])
+              : el('span', { class: 'hint', style: 'font-size:11px;' }, ['—']),
+          ]),
+          el('td', {}, [
+            el('div', {
+              style: `font-size:11px;margin-bottom:4px;color:${progressPct >= 100 ? 'var(--ok)' : (transcription?.status === 'failed' ? 'var(--err)' : 'var(--muted)')};`,
+            }, [statusLabel]),
+            progressPct != null
+              ? el('div', {
+                  style: 'height:4px;border-radius:999px;background:var(--panel-2);overflow:hidden;margin-bottom:5px;',
+                  title: `进度 ${progressPct}%`,
+                }, [
+                  el('div', {
+                    style: `height:100%;width:${progressPct}%;background:${progressPct >= 100 ? 'var(--ok)' : 'var(--accent)'};transition:width .35s ease;`,
+                  }),
+                ])
               : null,
+            el('button', {
+              class: 'btn-secondary btn-small',
+              type: 'button',
+              style: 'font-size:11px;padding:2px 8px;',
+              disabled: !(item.transcription?.text || transcription?.result?.video_script || transcription?.result?.image_ocr_text || transcription?.text) ? 'disabled' : undefined,
+              onclick: () => showTranscriptionFloat(item, liveTranscription || item.transcription, transcription?.result),
+            }, ['查看']),
           ]),
         ])
       );
     });
     table.appendChild(tbody);
     container.appendChild(table);
+  }
+
+  function renderTopicItemFilters(topicId, pageItems) {
+    const current = topicItemFilters[topicId] || {};
+    const transcriptionStatus = topicTranscriptionStatus.get(topicId) || {};
+    const sort = el('select', { style: inputStyle('130px'), 'aria-label': '结果排序' }, [
+      ['value', '综合价值'],
+      ['relevance', '相关度'],
+      ['liked', '点赞数'],
+      ['collected', '收藏数'],
+      ['comments', '评论数'],
+      ['recent', '最近收录'],
+    ].map(([value, label]) => el('option', {
+      value,
+      selected: (current.sort_by || 'value') === value ? 'selected' : undefined,
+    }, [label])));
+    const type = el('select', { style: inputStyle('105px'), 'aria-label': '内容类型' }, [
+      ['', '全部类型'],
+      ['图文', '图文'],
+      ['视频', '视频'],
+    ].map(([value, label]) => el('option', {
+      value,
+      selected: (current.note_type || '') === value ? 'selected' : undefined,
+    }, [label])));
+    const minLiked = el('input', {
+      type: 'number',
+      min: '0',
+      value: current.min_liked || '',
+      placeholder: '最低赞',
+      style: inputStyle('88px'),
+      'aria-label': '最低点赞数',
+    });
+    const keyword = el('input', {
+      value: current.keyword || '',
+      placeholder: '筛标题/关键词',
+      style: inputStyle('140px'),
+      'aria-label': '筛选标题或关键词',
+    });
+    const apply = () => {
+      topicItemFilters[topicId] = {
+        sort_by: sort.value,
+        note_type: type.value,
+        min_liked: Number(minLiked.value || 0),
+        keyword: keyword.value.trim(),
+      };
+      loadTopicItems(topicId, 1);
+    };
+    sort.addEventListener('change', apply);
+    type.addEventListener('change', apply);
+    minLiked.addEventListener('change', apply);
+    keyword.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') apply();
+    });
+    const selectPage = () => {
+      const shouldSelect = pageItems.some((item) => !selectedRadarItems.has(`${topicId}:${item.url}`));
+      pageItems.forEach((item) => {
+        const key = `${topicId}:${item.url}`;
+        if (shouldSelect) selectedRadarItems.set(key, { ...item, topicId });
+        else selectedRadarItems.delete(key);
+      });
+      loadTopicItems(topicId, topicPages[topicId] || 1);
+    };
+    const reset = () => {
+      topicItemFilters[topicId] = {};
+      loadTopicItems(topicId, 1);
+    };
+    return el('div', {
+      style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0;padding:10px;border-radius:10px;background:var(--panel-2);',
+    }, [
+      el('span', { style: 'font-size:12px;font-weight:700;' }, ['结果筛选']),
+      el('label', { style: 'display:flex;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);' }, ['排序', sort]),
+      el('label', { style: 'display:flex;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);' }, ['类型', type]),
+      el('label', { style: 'display:flex;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);' }, ['点赞', minLiked]),
+      el('label', { style: 'display:flex;gap:5px;align-items:center;font-size:11.5px;color:var(--muted);' }, ['搜索', keyword]),
+      el('button', { class: 'btn-secondary btn-small', type: 'button', onclick: apply }, ['应用']),
+      el('button', { class: 'btn-secondary btn-small', type: 'button', onclick: reset }, ['重置']),
+      el('button', { class: 'btn-secondary btn-small', type: 'button', onclick: selectPage }, ['全选/取消本页']),
+      el('span', {
+        id: `intelTranscriptionStatus-${topicId}`,
+        class: 'hint',
+        style: `margin:0;font-size:11.5px;color:${transcriptionStatus.tone === 'ok' ? 'var(--ok)' : (transcriptionStatus.tone === 'error' ? 'var(--err)' : 'var(--muted)')};`,
+      }, [transcriptionStatus.message || '']),
+      el('span', { id: `intelSelectionCount-${topicId}`, class: 'hint', style: 'margin:0 0 0 auto;' }, [
+        `已选 ${selectedForTopic(topicId).length} 条`,
+      ]),
+      el('button', {
+        id: `intelTranscribeBtn-${topicId}`,
+        class: 'btn-primary btn-small',
+        type: 'button',
+        disabled: selectedForTopic(topicId).length ? undefined : 'disabled',
+        onclick: () => startSelectedTranscription(topicId),
+      }, ['转录选中内容']),
+    ]);
+  }
+
+  function selectedForTopic(topicId) {
+    return Array.from(selectedRadarItems.values()).filter((item) => item.topicId === topicId);
+  }
+
+  function updateSelectionBar(topicId) {
+    const count = selectedForTopic(topicId).length;
+    const countEl = document.getElementById(`intelSelectionCount-${topicId}`);
+    const button = document.getElementById(`intelTranscribeBtn-${topicId}`);
+    if (countEl) countEl.textContent = `已选 ${count} 条`;
+    if (button) button.disabled = count === 0;
+  }
+
+  async function startSelectedTranscription(topicId) {
+    const selected = selectedForTopic(topicId);
+    if (!selected.length) return;
+    const button = document.getElementById(`intelTranscribeBtn-${topicId}`);
+    if (button) {
+      button.disabled = true;
+      button.textContent = '启动中…';
+    }
+    try {
+      const resp = await fetch('/api/extract', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          urls: selected.map((item) => item.url),
+          transcribe_video: true,
+          long_video: true,
+          ocr_images: true,
+          cache_images: true,
+          accumulate: true,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `启动失败 (${resp.status})`);
+      selected.forEach((item) => transcriptionByUrl.set(item.url, { status: 'running' }));
+      setTopicTranscriptionStatus(topicId, `正在原位转录 ${selected.length} 条…`);
+      loadTopicItems(topicId, topicPages[topicId] || 1);
+      if (data.task?.id) pollInlineTranscription(topicId, data.task.id, selected);
+    } catch (e) {
+      setTopicTranscriptionStatus(topicId, `转录启动失败：${e.message}`, 'error');
+    } finally {
+      if (button) {
+        button.textContent = '转录选中内容';
+        updateSelectionBar(topicId);
+      }
+    }
   }
 
   function renderTopicPager(container, data, topicId) {
@@ -513,6 +1060,8 @@
       min_liked: Number(document.getElementById('intelTopicMinLiked').value || 0),
       min_collected: Number(document.getElementById('intelTopicMinCollected').value || 0),
       min_comments: Number(document.getElementById('intelTopicMinComments').value || 0),
+      min_views: Number(document.getElementById('intelTopicMinViews').value || 0),
+      search_mode: document.getElementById('intelTopicSearchMode').value || 'combined',
       sort_rounds: Array.from(document.querySelectorAll('.intelTopicSortRound:checked')).map((x) => x.value),
       note_type: document.getElementById('intelTopicNoteType').value || '',
     };
@@ -553,9 +1102,9 @@
         delete details.dataset.loaded;
         if (details.open) loadTopicItems(topicId, 1);
       }
-      await loadTopics();
       await refreshLoginStatus();
-      alert(result.message || '运行完成');
+      topicRunResults.set(topicId, result);
+      await loadTopics();
     } catch (e) {
       alert(`运行失败：${e.message}`);
     } finally {
@@ -599,11 +1148,46 @@
     } catch (e) { msgEl.textContent = `失败：${e.message}`; }
   }
 
-  function exportTopicPack(topicId, topicName) {
-    const a = document.createElement('a');
-    a.href = `${API}/watch-topics/${topicId}/export.md`;
-    a.download = `${topicName || '选题'}-选题包.md`;
-    a.click();
+  async function exportTopicPack(topicId, topicName) {
+    try {
+      const resp = await fetch(`${API}/watch-topics/${topicId}/export.md`);
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `导出失败 (${resp.status})`);
+      }
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${topicName || '选题'}-选题包.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (e) {
+      alert(`选题包导出失败：${e.message}`);
+    }
+  }
+
+  async function exportTopicExcel(topicId, topicName) {
+    try {
+      const resp = await fetch(`${API}/watch-topics/${topicId}/export.xlsx`);
+      if (!resp.ok) {
+        const detail = await resp.text();
+        throw new Error(detail || `导出失败 (${resp.status})`);
+      }
+      const blob = await resp.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = `${topicName || '选题'}-采集结果.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (e) {
+      alert(`Excel 导出失败：${e.message}`);
+    }
   }
 
   async function toggleDirections(topicId) {
@@ -639,24 +1223,110 @@
     const panel = document.getElementById('intelTabMining');
     panel.innerHTML = '';
 
+    const corpusSection = el('section', { class: 'panel' });
+    corpusSection.appendChild(el('div', { class: 'panel-head' }, ['语料分析与创作选题']));
+    const corpusBody = el('div', { class: 'panel-body' });
+    corpusBody.appendChild(el('p', { class: 'hint', style: 'margin:0 0 10px;' }, [
+      '这里直接使用第一模块已完成的正文、图片 OCR 和视频脚本，按创作需求形成共现关系与备选选题。',
+    ]));
+    const topicSel = el('select', {
+      id: 'intelMiningTopic',
+      style: inputStyle('220px'),
+      onchange: () => {
+        corpusBatch = 0;
+        loadCorpusAnalysis();
+        loadMiningInsights();
+      },
+    }, [el('option', { value: '' }, ['全部已转录语料'])]);
+    corpusBody.appendChild(el('div', { style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;' }, [
+      el('span', { class: 'hint', style: 'margin:0;' }, ['分析范围：']),
+      topicSel,
+      el('input', {
+        id: 'intelCreativeBrief',
+        value: creativeBrief,
+        placeholder: '创作需求：目标人群、产品或传播目标',
+        style: inputStyle('300px'),
+      }),
+      el('button', {
+        class: 'btn-primary btn-small',
+        onclick: () => {
+          creativeBrief = document.getElementById('intelCreativeBrief')?.value.trim() || '';
+          corpusBatch = 0;
+          loadCorpusAnalysis();
+        },
+      }, ['按需求生成']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        onclick: () => {
+          loadCorpusAnalysis();
+          loadMiningInsights();
+          loadBenchmark();
+        },
+      }, ['刷新语料分析']),
+      el('span', { id: 'intelCorpusNote', class: 'hint', style: 'margin:0;' }, []),
+    ]));
+    corpusBody.appendChild(el('details', {
+      id: 'intelLlmSettings',
+      open: true,
+      style: 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:rgba(47,123,255,.04);',
+    }, [
+      el('summary', {
+        style: 'cursor:pointer;font-size:13px;font-weight:600;list-style:none;',
+      }, ['腾讯云 TokenHub · DeepSeek 密钥']),
+      el('div', {
+        style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;',
+      }, [
+        el('input', {
+          id: 'intelLlmApiKey',
+          type: 'text',
+          placeholder: 'TokenHub API Key（sk-…）',
+          autocomplete: 'off',
+          style: inputStyle('320px'),
+        }),
+        el('select', {
+          id: 'intelLlmModel',
+          style: inputStyle('190px'),
+        }, [
+          el('option', { value: 'deepseek-v4-pro' }, ['deepseek-v4-pro']),
+          el('option', { value: 'deepseek-v4-flash' }, ['deepseek-v4-flash']),
+          el('option', { value: 'deepseek-v3.2' }, ['deepseek-v3.2']),
+        ]),
+        el('input', {
+          id: 'intelLlmBaseUrl',
+          type: 'text',
+          placeholder: 'https://tokenhub.tencentmaas.com/v1',
+          style: inputStyle('280px'),
+        }),
+        el('button', {
+          class: 'btn-secondary btn-small',
+          type: 'button',
+          onclick: () => testLlmSettings(),
+        }, ['测试连接']),
+        el('button', {
+          class: 'btn-primary btn-small',
+          type: 'button',
+          onclick: () => saveLlmSettings(),
+        }, ['保存']),
+        el('span', { id: 'intelLlmStatus', class: 'hint', style: 'margin:0;' }, ['加载中…']),
+      ]),
+      el('p', { class: 'hint', style: 'margin:8px 0 0;font-size:11.5px;line-height:1.5;' }, [
+        '按腾讯云 TokenHub 文档接入：base_url 为 https://tokenhub.tencentmaas.com/v1 ，密钥来自 TokenHub 控制台（不是 api.deepseek.com）。',
+      ]),
+    ]));
+    loadLlmSettings();
+    corpusBody.appendChild(el('div', { id: 'intelCorpusAnalysis' }, [
+      el('p', { class: 'hint' }, ['加载中…']),
+    ]));
+    corpusSection.appendChild(corpusBody);
+    panel.appendChild(corpusSection);
+
     const filterSection = el('section', { class: 'panel' });
-    filterSection.appendChild(el('div', { class: 'panel-head' }, ['多维选题挖掘']));
+    filterSection.style.marginTop = '14px';
+    filterSection.appendChild(el('div', { class: 'panel-head' }, ['从依据生成创作选题']));
     const filterBody = el('div', { class: 'panel-body' });
     filterBody.appendChild(
       el('p', { class: 'hint', style: 'margin:0 0 10px;line-height:1.55;' }, [
-        '不仅看关键词，还按功能场景、同类产品对比、多工具联动等 9 个维度分析已采集爆款，并给出可执行的搜索词建议。',
-      ])
-    );
-    const topicSel = el('select', {
-      id: 'intelMiningTopic',
-      style: inputStyle('200px'),
-      onchange: () => loadMiningInsights(),
-    }, [el('option', { value: '' }, ['全部选题'])]);
-    filterBody.appendChild(
-      el('div', { style: 'display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;' }, [
-        el('span', { class: 'hint', style: 'margin:0;' }, ['分析范围：']),
-        topicSel,
-        el('button', { class: 'btn-secondary btn-small', onclick: loadMiningInsights }, ['刷新分析']),
+        '结合爆款数据与已转录语料，从功能场景、产品对比、多工具联动等维度给出创作方向。',
       ])
     );
     filterBody.appendChild(el('p', { id: 'intelMiningNote', class: 'hint', style: 'margin:0 0 8px;' }, []));
@@ -664,18 +1334,6 @@
     filterSection.appendChild(filterBody);
     panel.appendChild(filterSection);
 
-    const sceneSection = el('section', { class: 'panel', style: 'margin-top:14px' });
-    sceneSection.appendChild(el('div', { class: 'panel-head' }, ['场景词矩阵（人群×场景）']));
-    sceneSection.appendChild(el('div', { class: 'panel-body', id: 'intelSceneMatrix' }, [el('p', { class: 'hint' }, ['—'])]));
-    panel.appendChild(sceneSection);
-
-    const s1 = el('section', { class: 'panel', style: 'margin-top:14px' });
-    s1.appendChild(el('div', { class: 'panel-head' }, ['关键词补充建议']));
-    const s1b = el('div', { class: 'panel-body' });
-    s1b.appendChild(el('p', { class: 'hint', style: 'margin:0 0 8px;' }, ['从小红书相关搜索与标题词频挖掘的补充词，可与上方维度分析配合使用。']));
-    s1b.appendChild(el('div', { id: 'intelSuggestTable' }, [el('p', { class: 'hint' }, ['—'])]));
-    s1.appendChild(s1b);
-    panel.appendChild(s1);
 
     const s2 = el('section', { class: 'panel', style: 'margin-top:14px' });
     s2.appendChild(el('div', { class: 'panel-head' }, ['跨选题对标']));
@@ -683,6 +1341,555 @@
     panel.appendChild(s2);
 
     populateMiningTopicSelect(topicSel);
+  }
+
+  async function startManualExtraction(event) {
+    const platform = document.getElementById('intelManualPlatform')?.value || 'xhs';
+    const input = document.getElementById('intelManualLinks');
+    const msg = document.getElementById('intelManualExtractMsg');
+    const text = input?.value.trim() || '';
+    const requestedUrls = text.split('\n').map((line) => line.trim()).filter(Boolean);
+    if (!text) {
+      if (msg) msg.textContent = '请至少粘贴一个分享链接。';
+      return;
+    }
+    const button = event?.currentTarget;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '启动中…';
+    }
+    try {
+      const endpoint = platform === 'channels' ? '/api/channels/extract' : '/api/extract';
+      const body = platform === 'channels'
+        ? { text, transcribe_video: true, long_video: true }
+        : {
+            text,
+            transcribe_video: true,
+            long_video: true,
+            ocr_images: true,
+            cache_images: true,
+            accumulate: true,
+          };
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `启动失败 (${resp.status})`);
+      if (input) input.value = '';
+      if (msg) {
+        msg.textContent = `已启动${platform === 'channels' ? '视频号' : '小红书'}提取与转录，结果将在下方原位更新。`;
+        msg.style.color = 'var(--ok)';
+      }
+      if (data.accumulated) renderManualTranscriptionResults(data.accumulated, requestedUrls);
+      pollManualTranscription(platform, data.task?.id || '', requestedUrls);
+    } catch (e) {
+      if (msg) {
+        msg.textContent = `启动失败：${e.message}`;
+        msg.style.color = 'var(--err)';
+      }
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = '提取并转录';
+      }
+    }
+  }
+
+  async function loadCorpusAnalysis() {
+    const container = document.getElementById('intelCorpusAnalysis');
+    if (!container) return;
+    const topicId = document.getElementById('intelMiningTopic')?.value || '';
+    try {
+      const query = new URLSearchParams({ batch: String(corpusBatch) });
+      if (topicId) query.set('topic_id', topicId);
+      if (creativeBrief) query.set('brief', creativeBrief);
+      const data = await api(`/corpus/analysis?${query.toString()}`);
+      renderCorpusAnalysis(container, data);
+    } catch (e) {
+      container.innerHTML = '';
+      container.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`语料分析失败：${e.message}`]));
+    }
+  }
+
+  async function loadLlmSettings() {
+    const statusEl = document.getElementById('intelLlmStatus');
+    const keyEl = document.getElementById('intelLlmApiKey');
+    const modelEl = document.getElementById('intelLlmModel');
+    const baseEl = document.getElementById('intelLlmBaseUrl');
+    if (!statusEl) return;
+    try {
+      const data = await api('/llm/status');
+      if (keyEl && data.api_key) keyEl.value = data.api_key;
+      if (modelEl && data.model) modelEl.value = data.model;
+      if (baseEl) baseEl.value = data.base_url || 'https://tokenhub.tencentmaas.com/v1';
+      statusEl.textContent = data.configured
+        ? `已配置 · ${data.provider || 'tokenhub'} · ${data.model || ''} · ${data.api_key_masked || ''}`
+        : '未配置密钥';
+      statusEl.style.color = data.configured ? '' : 'var(--err)';
+    } catch (e) {
+      statusEl.textContent = `读取失败：${e.message}`;
+      statusEl.style.color = 'var(--err)';
+    }
+  }
+
+  async function saveLlmSettings() {
+    const statusEl = document.getElementById('intelLlmStatus');
+    const keyEl = document.getElementById('intelLlmApiKey');
+    const modelEl = document.getElementById('intelLlmModel');
+    const baseEl = document.getElementById('intelLlmBaseUrl');
+    const apiKey = keyEl?.value.trim() || '';
+    const model = modelEl?.value || 'deepseek-v4-pro';
+    const baseUrl = baseEl?.value.trim() || 'https://tokenhub.tencentmaas.com/v1';
+    if (!apiKey) {
+      alert('请先填写 API Key');
+      return;
+    }
+    if (statusEl) statusEl.textContent = '保存中…';
+    try {
+      const data = await api('/llm/config', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: apiKey, model, base_url: baseUrl }),
+      });
+      if (baseEl && data.base_url) baseEl.value = data.base_url;
+      if (statusEl) {
+        statusEl.textContent = `已保存 · ${data.provider || 'tokenhub'} · ${data.model || model} · ${data.api_key_masked || ''}`;
+        statusEl.style.color = '#059669';
+      }
+    } catch (e) {
+      if (statusEl) {
+        statusEl.textContent = `保存失败：${e.message}`;
+        statusEl.style.color = 'var(--err)';
+      }
+      alert(`保存失败：${e.message}`);
+    }
+  }
+
+  async function testLlmSettings() {
+    const statusEl = document.getElementById('intelLlmStatus');
+    const keyEl = document.getElementById('intelLlmApiKey');
+    const modelEl = document.getElementById('intelLlmModel');
+    const baseEl = document.getElementById('intelLlmBaseUrl');
+    const apiKey = keyEl?.value.trim() || '';
+    const model = modelEl?.value || 'deepseek-v4-pro';
+    const baseUrl = baseEl?.value.trim() || 'https://tokenhub.tencentmaas.com/v1';
+    if (statusEl) statusEl.textContent = '测试中…';
+    try {
+      const data = await api('/llm/test', {
+        method: 'POST',
+        body: JSON.stringify({ api_key: apiKey || null, model, base_url: baseUrl }),
+      });
+      if (data.ok) {
+        if (statusEl) {
+          statusEl.textContent = `连接成功 · ${data.model} · ${data.reply || 'ok'}`;
+          statusEl.style.color = '#059669';
+        }
+      } else {
+        const err = data.error || '未知错误';
+        if (statusEl) {
+          statusEl.textContent = /401|Authentication|invalid/i.test(err)
+            ? '鉴权失败：请确认是 TokenHub 密钥，且 base_url 为 tokenhub.tencentmaas.com/v1'
+            : `失败：${err.slice(0, 140)}`;
+          statusEl.style.color = 'var(--err)';
+        }
+      }
+    } catch (e) {
+      if (statusEl) {
+        statusEl.textContent = `测试失败：${e.message}`;
+        statusEl.style.color = 'var(--err)';
+      }
+    }
+  }
+
+  function renderCooccurrenceNetwork(container, pairs, terms) {
+    const termItems = (terms || []).slice(0, 24);
+    const nodeNames = termItems.map((item) => item.term);
+    const nodeSet = new Set(nodeNames);
+    const termCounts = new Map(termItems.map((item) => [item.term, Number(item.count || 0)]));
+    const clusterByName = new Map(termItems.map((item) => [item.term, Number(item.cluster || 0)]));
+    const clusterColors = ['#3977f6', '#16a394', '#8b5cf6', '#f59e42'];
+    const usablePairs = (pairs || []).filter(
+      (pair) => pair.source && pair.target && nodeSet.has(pair.source) && nodeSet.has(pair.target)
+    );
+    if (!nodeNames.length) {
+      container.appendChild(el('p', { class: 'hint', style: 'margin:0;' }, ['样本较少，暂未形成稳定共现关系。']));
+      return;
+    }
+    const scores = new Map();
+    termItems.forEach((item) => scores.set(item.term, Number(item.relevance || item.count || 1)));
+    usablePairs.forEach((pair) => {
+      const count = Number(pair.count || 0);
+      scores.set(pair.source, (scores.get(pair.source) || 0) + count);
+      scores.set(pair.target, (scores.get(pair.target) || 0) + count);
+    });
+    const width = 600;
+    const height = 340;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const positions = new Map();
+    const ringSizes = nodeNames.length > 20
+      ? [Math.min(6, nodeNames.length), Math.min(8, Math.max(0, nodeNames.length - 6)), Math.max(0, nodeNames.length - 14)]
+      : (nodeNames.length > 10 ? [Math.ceil(nodeNames.length * .4), Math.floor(nodeNames.length * .6)] : [nodeNames.length]);
+    const ringRadii = ringSizes.length === 3 ? [52, 102, 148] : (ringSizes.length === 2 ? [68, 132] : [112]);
+    let offset = 0;
+    ringSizes.forEach((ringCount, ring) => {
+      nodeNames.slice(offset, offset + ringCount).forEach((name, index) => {
+        const angle = -Math.PI / 2 + (index / Math.max(1, ringCount)) * Math.PI * 2;
+        positions.set(name, {
+          x: centerX + Math.cos(angle) * ringRadii[ring],
+          y: centerY + Math.sin(angle) * ringRadii[ring],
+        });
+      });
+      offset += ringCount;
+    });
+
+    const selected = new Set();
+    const dragState = { active: null, offsetX: 0, offsetY: 0, moved: false, startX: 0, startY: 0 };
+    container.style.position = 'relative';
+    const tooltip = el('div', {
+      style: 'display:none;position:fixed;z-index:30;padding:6px 9px;border-radius:8px;background:#183052;color:white;font-size:11.5px;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.18);',
+    });
+    container.appendChild(tooltip);
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('role', 'img');
+    svg.setAttribute('aria-label', '词语共现关系网络，可点击词语进行多选高亮');
+    svg.style.cssText = 'width:100%;height:340px;display:block;border-radius:8px;background:var(--panel-2);';
+    const edgeEls = [];
+    const nodeEls = new Map();
+    const maxPairCount = Math.max(1, ...usablePairs.map((pair) => Number(pair.count || 0)));
+    const maxScore = Math.max(1, ...scores.values());
+
+    usablePairs.forEach((pair) => {
+      const from = positions.get(pair.source);
+      const to = positions.get(pair.target);
+      const line = document.createElementNS(ns, 'line');
+      line.setAttribute('x1', from.x);
+      line.setAttribute('y1', from.y);
+      line.setAttribute('x2', to.x);
+      line.setAttribute('y2', to.y);
+      const sameCluster = clusterByName.get(pair.source) === clusterByName.get(pair.target);
+      line.setAttribute('stroke', sameCluster ? clusterColors[clusterByName.get(pair.source) % clusterColors.length] : '#a9b8cc');
+      line.setAttribute('stroke-opacity', sameCluster ? '.32' : '.18');
+      line.setAttribute('stroke-width', String(.8 + Number(pair.count || 0) / maxPairCount * 2.2));
+      svg.appendChild(line);
+      edgeEls.push({ line, pair });
+    });
+
+    const updateHighlight = () => {
+      const neighbors = new Set();
+      usablePairs.forEach((pair) => {
+        if (selected.has(pair.source)) neighbors.add(pair.target);
+        if (selected.has(pair.target)) neighbors.add(pair.source);
+      });
+      nodeEls.forEach(({ group, circle, baseColor }, name) => {
+        const isSelected = selected.has(name);
+        const isNeighbor = neighbors.has(name);
+        group.style.opacity = !selected.size || isSelected ? '1' : (isNeighbor ? '.68' : '.2');
+        circle.setAttribute('fill', isSelected ? '#ff8a3d' : baseColor);
+        circle.setAttribute('stroke-width', isSelected ? '4' : '2');
+      });
+
+      edgeEls.forEach(({ line, pair }) => {
+        const active = selected.has(pair.source) || selected.has(pair.target);
+        const sameCluster = clusterByName.get(pair.source) === clusterByName.get(pair.target);
+        const baseColor = sameCluster ? clusterColors[clusterByName.get(pair.source) % clusterColors.length] : '#a9b8cc';
+        line.setAttribute('stroke', selected.size && active ? '#ff8a3d' : baseColor);
+        line.setAttribute('stroke-opacity', selected.size ? (active ? '.92' : '.05') : (sameCluster ? '.32' : '.18'));
+      });
+      status.textContent = selected.size
+        ? `已高亮：${Array.from(selected).join('、')}`
+        : `共 ${nodeNames.length} 个相关关键词 · 悬浮查看词频，点击可多选高亮`;
+      clearButton.hidden = selected.size === 0;
+    };
+    const toggleSelection = (name) => {
+      if (selected.has(name)) selected.delete(name);
+      else selected.add(name);
+      updateHighlight();
+    };
+
+    nodeNames.forEach((name) => {
+      const pos = positions.get(name);
+      const group = document.createElementNS(ns, 'g');
+      group.setAttribute('role', 'button');
+      group.setAttribute('tabindex', '0');
+      group.setAttribute('aria-label', `${name}，词频 ${termCounts.get(name) || 0}`);
+      group.style.cursor = 'pointer';
+      const title = document.createElementNS(ns, 'title');
+      title.textContent = `${name} · 词频 ${termCounts.get(name) || 0}`;
+      const circle = document.createElementNS(ns, 'circle');
+      const nodeRadius = 10 + scores.get(name) / maxScore * 9;
+      circle.setAttribute('cx', pos.x);
+      circle.setAttribute('cy', pos.y);
+      circle.setAttribute('r', nodeRadius);
+      circle.setAttribute('data-base-r', String(nodeRadius));
+      const baseColor = clusterColors[clusterByName.get(name) % clusterColors.length];
+      circle.setAttribute('fill', baseColor);
+      circle.setAttribute('stroke', 'white');
+      circle.setAttribute('stroke-width', '2');
+      circle.style.pointerEvents = 'auto';
+      const text = document.createElementNS(ns, 'text');
+      text.setAttribute('x', pos.x);
+      text.setAttribute('y', pos.y + nodeRadius + 14);
+      text.setAttribute('text-anchor', 'middle');
+      text.setAttribute('font-size', '11');
+      text.setAttribute('font-weight', '600');
+      text.setAttribute('fill', 'currentColor');
+      text.style.pointerEvents = 'none';
+      text.textContent = name;
+
+      group.addEventListener('mousedown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        dragState.active = name;
+        dragState.moved = false;
+        dragState.startX = event.clientX;
+        dragState.startY = event.clientY;
+        const rect = svg.getBoundingClientRect();
+        const scaleX = width / rect.width;
+        const scaleY = height / rect.height;
+        dragState.offsetX = event.clientX * scaleX - pos.x;
+        dragState.offsetY = event.clientY * scaleY - pos.y;
+        group.style.cursor = 'grabbing';
+      });
+      window.addEventListener('mousemove', (event) => {
+        if (dragState.active !== name) return;
+        const rect = svg.getBoundingClientRect();
+        const scaleX = width / rect.width;
+        const scaleY = height / rect.height;
+        if (Math.abs(event.clientX - dragState.startX) > 3 || Math.abs(event.clientY - dragState.startY) > 3) {
+          dragState.moved = true;
+        }
+        const nx = event.clientX * scaleX - dragState.offsetX;
+        const ny = event.clientY * scaleY - dragState.offsetY;
+        positions.set(name, { x: nx, y: ny });
+        circle.setAttribute('cx', nx);
+        circle.setAttribute('cy', ny);
+        text.setAttribute('x', nx);
+        text.setAttribute('y', ny + nodeRadius + 14);
+        edgeEls.forEach(({ line, pair }) => {
+          if (pair.source !== name && pair.target !== name) return;
+          const from = positions.get(pair.source);
+          const to = positions.get(pair.target);
+          line.setAttribute('x1', from.x);
+          line.setAttribute('y1', from.y);
+          line.setAttribute('x2', to.x);
+          line.setAttribute('y2', to.y);
+        });
+      });
+      window.addEventListener('mouseup', () => {
+        if (dragState.active === name) {
+          dragState.active = null;
+          group.style.cursor = 'grab';
+        }
+      });
+      group.style.cursor = 'grab';
+
+      group.addEventListener('click', (event) => {
+        if (dragState.moved) return;
+        toggleSelection(name);
+      });
+      group.addEventListener('mouseenter', () => {
+        status.textContent = `${name} · 词频 ${termCounts.get(name) || 0}`;
+        tooltip.textContent = `${name} · 词频 ${termCounts.get(name) || 0}`;
+        tooltip.style.display = 'block';
+      });
+      group.addEventListener('mousemove', (event) => {
+        tooltip.style.left = `${event.clientX + 12}px`;
+        tooltip.style.top = `${event.clientY + 12}px`;
+      });
+      group.addEventListener('mouseleave', () => {
+        status.textContent = selected.size ? `已高亮：${Array.from(selected).join('、')}` : '悬浮查看词频，点击可多选高亮';
+        tooltip.style.display = 'none';
+      });
+      group.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggleSelection(name);
+        }
+      });
+      group.appendChild(title);
+      group.appendChild(circle);
+      group.appendChild(text);
+      svg.appendChild(group);
+      nodeEls.set(name, { group, circle, baseColor });
+    });
+
+    const status = el('span', { class: 'hint', style: 'margin:0;font-size:11.5px;' }, [
+      `共 ${nodeNames.length} 个相关关键词 · 悬浮查看词频，点击可多选高亮`,
+    ]);
+    const clearButton = el('button', {
+      class: 'btn-secondary btn-small',
+      type: 'button',
+      hidden: 'hidden',
+      onclick: () => {
+        selected.clear();
+        updateHighlight();
+      },
+    }, ['清除高亮']);
+    container.appendChild(el('div', {
+      style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;',
+    }, [status, clearButton]));
+    container.appendChild(svg);
+  }
+
+  function renderCorpusAnalysis(container, data) {
+    container.innerHTML = '';
+    const summary = data.summary || {};
+    const stats = el('div', {
+      style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:14px;',
+    });
+    [
+      ['有效语料', summary.items || 0],
+      ['视频脚本', summary.with_script || 0],
+      ['图片 OCR', summary.with_ocr || 0],
+      ['小红书 / 视频号', `${summary.xhs || 0} / ${summary.channels || 0}`],
+      ['视频 / 图文', `${summary.videos || 0} / ${summary.graphics || 0}`],
+    ].forEach(([label, value]) => {
+      stats.appendChild(el('div', {
+        style: 'padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);',
+      }, [
+        el('div', { style: 'font-size:11.5px;color:var(--muted);' }, [label]),
+        el('div', { style: 'font-size:20px;font-weight:700;margin-top:3px;' }, [String(value)]),
+      ]));
+    });
+    container.appendChild(stats);
+
+    if (!summary.items) {
+      container.appendChild(el('p', { class: 'hint' }, ['暂无匹配语料。请先在“获取选题与依据”中勾选内容并启动转录。']));
+      return;
+    }
+
+    const analysisGrid = el('div', {
+      style: 'display:grid;grid-template-columns:minmax(0,1.45fr) minmax(260px,.75fr);gap:12px;align-items:start;',
+    });
+    const relations = el('div', {
+      style: 'padding:12px;border:1px solid var(--border);border-radius:10px;',
+    }, [el('div', { style: 'font-weight:700;margin-bottom:8px;' }, ['相关关键词与整体共现网络'])]);
+    const pairs = data.cooccurrence || [];
+    renderCooccurrenceNetwork(relations, pairs, data.top_terms || []);
+    analysisGrid.appendChild(relations);
+    const insights = el('div', {
+      style: 'display:flex;flex-direction:column;gap:10px;',
+    });
+    const suggestions = el('div', {
+      style: 'padding:11px;border:1px solid rgba(47,123,255,.3);border-radius:10px;background:rgba(47,123,255,.05);',
+    });
+    const llmFailHint = (() => {
+      const err = String(data.llm_error || '');
+      if (!err) return '规则兜底';
+      if (/401|Authentication|invalid/i.test(err)) return '密钥无效·规则兜底';
+      return '规则兜底';
+    })();
+    const llmBadge = data.llm_used
+      ? el('span', {
+          class: 'hint',
+          style: 'margin:0;padding:2px 8px;border-radius:6px;background:rgba(16,185,129,.12);color:#059669;font-size:11px;font-weight:600;',
+          title: '由腾讯云 TokenHub · DeepSeek 生成',
+        }, ['TokenHub'])
+      : (data.brief
+        ? el('span', {
+            class: 'hint',
+            style: 'margin:0;padding:2px 8px;border-radius:6px;background:rgba(100,116,139,.1);color:#64748b;font-size:11px;',
+            title: data.llm_error || '未调用大模型',
+          }, [llmFailHint])
+        : null);
+    suggestions.appendChild(el('div', {
+      style: 'display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;',
+    }, [
+      el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' }, [
+        el('div', { style: 'font-weight:700;' }, ['可直接进入创作的选题']),
+        llmBadge,
+      ]),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => {
+          corpusBatch += 1;
+          loadCorpusAnalysis();
+        },
+      }, ['换一批']),
+    ]));
+    const savedTitles = new Set((data.saved_topics || []).map((item) => item.title));
+    latestSuggestedTopics = (data.suggested_topics || []).slice(0, 6).map((raw, index) => {
+      const topic = typeof raw === 'string'
+        ? { title: raw, angle_id: '', angle_name: '', angle: '', evidence: [] }
+        : raw;
+      return { ...topic, index: index + 1 };
+    });
+    latestSuggestedTopics.forEach((topic) => {
+      const saveButton = el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        disabled: savedTitles.has(topic.title) ? 'disabled' : undefined,
+        onclick: () => saveCreativeTopic(topic.title, data.topic_id || '', data.batch || 0, saveButton),
+      }, [savedTitles.has(topic.title) ? '已保存' : '保存']);
+      suggestions.appendChild(el('div', {
+        style: 'display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px dashed var(--border);',
+      }, [
+        el('div', { style: 'flex:1;min-width:0;' }, [
+          el('div', { style: 'font-size:13px;font-weight:700;line-height:1.4;' }, [`${topic.index}. ${topic.title}`]),
+          topic.angle_name
+            ? el('div', { class: 'hint', style: 'font-size:11px;margin-top:2px;' }, [`↓ ${topic.angle_name}`])
+            : null,
+        ]),
+        saveButton,
+      ]));
+    });
+    if (!latestSuggestedTopics.length) {
+      suggestions.appendChild(el('p', { class: 'hint', style: 'margin:8px 0 0;' }, ['暂无选题，先填写创作需求或刷新分析。']));
+    }
+    suggestions.appendChild(el('p', { class: 'hint', style: 'margin:8px 0 0;font-size:11.5px;' }, [
+      '下方维度卡按同名结构展开依据；每条选题与下方标题一一对应。',
+    ]));
+    // refresh bottom mapping with latest titles
+    loadMiningInsights();
+    const saved = data.saved_topics || [];
+    if (saved.length) {
+      const savedDetails = el('details', { style: 'margin-top:10px;' }, [
+        el('summary', { class: 'hint', style: 'cursor:pointer;font-weight:600;' }, [`已保存选题（${saved.length}）`]),
+      ]);
+      const savedList = el('div', { style: 'padding-top:6px;' });
+      saved.slice(0, 30).forEach((item) => {
+        savedList.appendChild(el('div', {
+          style: 'display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;',
+        }, [
+          el('span', { style: 'flex:1;' }, [item.title]),
+          el('button', {
+            class: 'btn-secondary btn-small',
+            type: 'button',
+            onclick: async () => {
+              await api(`/corpus/topics/${item.id}`, { method: 'DELETE' });
+              loadCorpusAnalysis();
+            },
+          }, ['移除']),
+        ]));
+      });
+      savedDetails.appendChild(savedList);
+      suggestions.appendChild(savedDetails);
+    }
+    insights.appendChild(suggestions);
+    analysisGrid.appendChild(insights);
+    container.appendChild(analysisGrid);
+  }
+
+  async function saveCreativeTopic(title, topicId, batch, button) {
+    button.disabled = true;
+    button.textContent = '保存中…';
+    try {
+      await api('/corpus/topics', {
+        method: 'POST',
+        body: JSON.stringify({ title, topic_id: topicId, batch }),
+      });
+      button.textContent = '已保存';
+      loadCorpusAnalysis();
+    } catch (e) {
+      button.disabled = false;
+      button.textContent = '重试';
+      alert(`保存失败：${e.message}`);
+    }
   }
 
   async function populateMiningTopicSelect(sel) {
@@ -700,7 +1907,6 @@
   async function loadMiningInsights() {
     const anglesEl = document.getElementById('intelMiningAngles');
     const noteEl = document.getElementById('intelMiningNote');
-    const sceneEl = document.getElementById('intelSceneMatrix');
     const topicSel = document.getElementById('intelMiningTopic');
     if (!anglesEl) return;
     const topicId = topicSel?.value || '';
@@ -717,16 +1923,11 @@
         );
         return;
       }
-      const [mining, suggestions] = await Promise.all([
-        api(`/mining/insights${qs}`),
-        api('/suggestions?limit=15'),
-      ]);
+      const mining = await api(`/mining/insights${qs}`);
       if (noteEl) {
         noteEl.textContent = `${mining.scope} · 共 ${mining.total_items} 条爆款 · ${mining.methodology_note || ''}`;
       }
-      renderMiningAngles(anglesEl, mining.angles || []);
-      renderSceneMatrix(sceneEl, mining.scene_matrix || [], mining.base_keywords || []);
-      renderSuggestTable(document.getElementById('intelSuggestTable'), suggestions.items || []);
+      renderMiningAngles(anglesEl, mining.angles || [], latestSuggestedTopics);
     } catch (e) {
       anglesEl.innerHTML = '';
       const msg = /404|Not Found/i.test(e.message)
@@ -736,14 +1937,29 @@
     }
   }
 
-  function renderMiningAngles(container, angles) {
+  function renderMiningAngles(container, angles, suggestedTopics) {
     container.innerHTML = '';
     if (!angles.length) {
-      container.appendChild(el('p', { class: 'hint' }, ['暂无数据，请先在「选题建立」运行采集。']));
+      container.appendChild(el('p', { class: 'hint' }, ['暂无数据，请先在「爆款采集」运行任务。']));
       return;
     }
+    const mapped = Array.isArray(suggestedTopics) ? suggestedTopics : [];
+    const byAngle = new Map();
+    mapped.forEach((topic) => {
+      const key = topic.angle_id || topic.angle_name || '';
+      if (!byAngle.has(key)) byAngle.set(key, []);
+      byAngle.get(key).push(topic);
+    });
+    const ordered = [...angles].sort((a, b) => {
+      const aHit = (byAngle.get(a.id) || byAngle.get(a.name) || []).length;
+      const bHit = (byAngle.get(b.id) || byAngle.get(b.name) || []).length;
+      if (aHit !== bHit) return bHit - aHit;
+      return (b.item_count || 0) - (a.item_count || 0);
+    });
     const grid = el('div', { style: 'display:flex;flex-direction:column;gap:12px;' });
-    angles.forEach((a) => {
+    ordered.forEach((a) => {
+      const linked = byAngle.get(a.id) || byAngle.get(a.name) || [];
+      if (mapped.length && !linked.length) return; // only show dimensions that correspond to top titles
       const card = el('div', {
         style: 'border:1px solid var(--border);border-radius:12px;padding:12px 14px;background:var(--panel);',
       });
@@ -761,7 +1977,27 @@
         ]),
       ]);
       card.appendChild(head);
-      card.appendChild(el('p', { class: 'hint', style: 'margin:0 0 8px;font-size:12px;' }, [a.mechanism]));
+      card.appendChild(el('p', { class: 'hint', style: 'margin:0 0 8px;font-size:12px;' }, [
+        `为什么会爆：${a.mechanism || '-'}`,
+      ]));
+
+      if (linked.length) {
+        const topicBlock = el('div', {
+          style: 'margin:0 0 10px;padding:8px 10px;border-radius:8px;background:rgba(47,123,255,.06);border:1px solid rgba(47,123,255,.18);',
+        });
+        topicBlock.appendChild(el('div', { style: 'font-size:12px;font-weight:700;margin-bottom:6px;' }, ['对应上方选题']));
+        linked.forEach((topic) => {
+          topicBlock.appendChild(el('div', {
+            style: 'font-size:12.5px;line-height:1.45;padding:3px 0;',
+          }, [
+            el('span', { style: 'font-weight:600;' }, [`${topic.index}. ${topic.title}`]),
+            topic.angle
+              ? el('div', { class: 'hint', style: 'font-size:11px;margin-top:2px;' }, [topic.angle])
+              : null,
+          ]));
+        });
+        card.appendChild(topicBlock);
+      }
 
       if ((a.suggested_keywords || []).length) {
         card.appendChild(
@@ -778,63 +2014,35 @@
         );
       }
 
-      if (a.suggested_title) {
-        card.appendChild(el('div', { style: 'font-size:12.5px;color:var(--accent);margin-bottom:8px;' }, [
-          `仿写参考：${a.suggested_title}`,
-        ]));
-      }
-
       const evidence = a.top_evidence || [];
       if (evidence.length) {
         const details = el('details', { style: 'margin-top:4px;' });
         details.appendChild(el('summary', { style: 'cursor:pointer;font-size:12.5px;color:var(--accent);' }, [
-          `查看佐证爆款（${evidence.length} 条）`,
+          `佐证爆款（${evidence.length} 条，点标题打开）`,
         ]));
         const ul = el('ul', { style: 'margin:8px 0 0;padding-left:18px;font-size:12.5px;line-height:1.5;' });
         evidence.forEach((ev) => {
           ul.appendChild(el('li', { style: 'margin-bottom:4px;' }, [
-            el('a', { href: ev.url, target: '_blank', style: 'color:var(--text);' }, [ev.title || '(无标题)']),
+            el('a', { href: ev.url, target: '_blank', style: 'color:var(--accent);font-weight:600;' }, [ev.title || '(无标题)']),
             ` · 赞${fmtNum(ev.liked_count)} · ${ev.content_type || ''}`,
           ]));
         });
         details.appendChild(ul);
         card.appendChild(details);
+      } else {
+        card.appendChild(el('p', { class: 'hint', style: 'margin:0;font-size:12px;' }, [
+          '暂无同结构爆款样本，建议按上方搜索词补采集后再生成。',
+        ]));
       }
       grid.appendChild(card);
     });
+    if (!grid.childNodes.length) {
+      container.appendChild(el('p', { class: 'hint' }, ['先在上方生成选题，这里会按对应维度展开依据。']));
+      return;
+    }
     container.appendChild(grid);
   }
 
-  function renderSceneMatrix(container, rows, bases) {
-    if (!container) return;
-    container.innerHTML = '';
-    if (!rows.length) {
-      container.appendChild(el('p', { class: 'hint' }, ['暂无场景词，多采集功能场景类爆款后会出现。']));
-      return;
-    }
-    const table = el('table', { class: 'show' });
-    table.appendChild(el('thead', {}, [el('tr', {}, [
-      el('th', {}, ['场景词']), el('th', {}, ['出现次数']), el('th', {}, ['建议选题搜索词']), el('th', {}, ['操作']),
-    ])]));
-    const tbody = el('tbody');
-    rows.forEach((r) => {
-      tbody.appendChild(el('tr', {}, [
-        el('td', { style: 'font-weight:600;' }, [r.scene]),
-        el('td', {}, [String(r.count)]),
-        el('td', { style: 'font-size:12.5px;' }, [r.suggestion]),
-        el('td', {}, [
-          el('button', { class: 'btn-primary btn-small', onclick: () => createTopicFromMining(r.suggestion, `场景-${r.scene}`) }, ['创建选题']),
-        ]),
-      ]));
-    });
-    table.appendChild(tbody);
-    container.appendChild(table);
-    if (bases.length) {
-      container.appendChild(el('p', { class: 'hint', style: 'margin-top:8px;' }, [
-        `基础词：${bases.join('、')}`,
-      ]));
-    }
-  }
 
   async function createTopicFromMining(keyword, name) {
     const kw = (keyword || '').trim();
@@ -926,8 +2134,17 @@
   function renderTrackedTab() {
     const panel = document.getElementById('intelTabTracked');
     panel.innerHTML = '';
+
+    const corpusSection = el('section', { class: 'panel' });
+    corpusSection.appendChild(el('div', { class: 'panel-head' }, ['语料资产概览']));
+    corpusSection.appendChild(el('div', { class: 'panel-body', id: 'intelTrackedCorpusSummary' }, [
+      el('p', { class: 'hint' }, ['加载中…']),
+    ]));
+    panel.appendChild(corpusSection);
+
     const section = el('section', { class: 'panel' });
-    section.appendChild(el('div', { class: 'panel-head' }, ['自有内容追踪']));
+    section.style.marginTop = '14px';
+    section.appendChild(el('div', { class: 'panel-head' }, ['已发布作品追踪']));
     const body = el('div', { class: 'panel-body' });
 
     body.appendChild(el('p', { class: 'hint', style: 'margin:0 0 10px;' }, [
@@ -955,6 +2172,29 @@
     ]));
     section.appendChild(body);
     panel.appendChild(section);
+  }
+
+  async function loadTrackedCorpusSummary() {
+    const container = document.getElementById('intelTrackedCorpusSummary');
+    if (!container) return;
+    try {
+      const data = await api('/corpus/analysis');
+      const summary = data.summary || {};
+      container.innerHTML = '';
+      container.appendChild(el('div', {
+        style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;',
+      }, [
+        el('span', { class: 'badge' }, [`语料 ${summary.items || 0}`]),
+        el('span', { class: 'badge' }, [`小红书 ${summary.xhs || 0}`]),
+        el('span', { class: 'badge' }, [`视频号 ${summary.channels || 0}`]),
+        el('span', { class: 'badge' }, [`视频脚本 ${summary.with_script || 0}`]),
+        el('span', { class: 'badge' }, [`图片 OCR ${summary.with_ocr || 0}`]),
+        el('span', { class: 'hint', style: 'margin:0;' }, ['用于观察当前语料资产覆盖和主题分布。']),
+      ]));
+    } catch (e) {
+      container.innerHTML = '';
+      container.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`加载失败：${e.message}`]));
+    }
   }
 
   async function loadTracked() {
@@ -1103,8 +2343,8 @@
   function init() {
     if (inited && document.getElementById('intelTabTopics')) {
       if (currentIntelTab === 'topics') loadTopics();
-      if (currentIntelTab === 'mining') { loadMiningInsights(); loadBenchmark(); }
-      if (currentIntelTab === 'tracked') loadTracked();
+      if (currentIntelTab === 'mining') { loadCorpusAnalysis(); loadMiningInsights(); loadBenchmark(); }
+      if (currentIntelTab === 'tracked') { loadTrackedCorpusSummary(); loadTracked(); }
       refreshLoginStatus();
       return;
     }

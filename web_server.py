@@ -18,6 +18,10 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from env_loader import load_dotenv
+
+load_dotenv()
+
 from excel_export import build_excel_bytes
 from extract_task import (
     ExtractTaskOptions,
@@ -56,7 +60,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 CORS_ORIGINS = [o.strip() for o in os.environ.get("APP_CORS_ORIGINS", "*").split(",") if o.strip()]
 
-app = FastAPI(title="社媒内容提取", version="1.12.0")
+app = FastAPI(title="社媒内容提取", version="1.21.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS or ["*"],
@@ -264,8 +268,10 @@ APP_VERSION = app.version
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    payload: dict[str, str] = {"status": "ok", "version": APP_VERSION}
+def health() -> dict[str, Any]:
+    from llm_client import llm_status
+
+    payload: dict[str, Any] = {"status": "ok", "version": APP_VERSION, "llm": llm_status()}
     if os.environ.get("DEMO_MODE") == "1" or (ROOT / "output" / ".demo_mode").exists():
         payload["mode"] = "demo"
     return payload
@@ -740,6 +746,15 @@ def image_proxy(url: str = Query(..., min_length=8)) -> Response:
 
     content_type = resp.headers.get("Content-Type", "image/jpeg")
     return Response(content=resp.content, media_type=content_type)
+
+
+@app.get("/api/media/{feed_id}/{filename}")
+def local_media(feed_id: str, filename: str) -> FileResponse:
+    media_root = (ROOT / "output" / "media").resolve()
+    target = (media_root / Path(feed_id).name / Path(filename).name).resolve()
+    if media_root not in target.parents or not target.is_file():
+        raise HTTPException(404, "媒体文件不存在")
+    return FileResponse(target)
 
 
 @app.get("/api/discover/sources")

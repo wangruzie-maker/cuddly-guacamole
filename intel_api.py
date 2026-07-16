@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import os
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import Response
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 
 import intel_product
 import intel_service
+from intel_corpus import analyze_corpus, delete_saved_topic, list_saved_topics, save_creative_topic
 from intel_scheduler import start_scheduler
 
 router = APIRouter(prefix="/api/intel", tags=["intel"])
@@ -40,7 +42,7 @@ class WatchTopicCreate(BaseModel):
     platforms: list[str] = Field(default_factory=lambda: ["xhs"])
     keywords: list[str] = Field(default_factory=list)
     filters: dict[str, Any] = Field(default_factory=dict)
-    limit_per_run: int = 20
+    limit_per_run: int = Field(20, ge=1, le=200)
     interval_minutes: int = 360
     enabled: bool = True
 
@@ -50,7 +52,7 @@ class WatchTopicUpdate(BaseModel):
     platforms: list[str] | None = None
     keywords: list[str] | None = None
     filters: dict[str, Any] | None = None
-    limit_per_run: int | None = None
+    limit_per_run: int | None = Field(None, ge=1, le=200)
     interval_minutes: int | None = None
     enabled: bool | None = None
 
@@ -69,7 +71,13 @@ class PromoteSuggestion(BaseModel):
     keyword: str
     platform: str = "xhs"
     name: str = ""
-    limit_per_run: int = 20
+    limit_per_run: int = Field(20, ge=1, le=200)
+
+
+class CreativeTopicCreate(BaseModel):
+    title: str
+    topic_id: str = ""
+    batch: int = Field(0, ge=0)
 
 
 class TopicFromTemplate(BaseModel):
@@ -149,12 +157,27 @@ def api_run_watch_topic(topic_id: str) -> dict[str, Any]:
 def api_list_topic_items(
     topic_id: str,
     platform: str | None = None,
+    sort_by: str = "value",
+    note_type: str | None = None,
+    min_liked: int = 0,
+    min_collected: int = 0,
+    min_comments: int = 0,
+    keyword: str | None = None,
     page: int = 1,
     page_size: int = 10,
 ) -> dict[str, Any]:
     try:
         return intel_service.list_topic_items(
-            topic_id, platform=platform, page=page, page_size=page_size
+            topic_id,
+            platform=platform,
+            sort_by=sort_by,
+            note_type=note_type,
+            min_liked=max(0, min_liked),
+            min_collected=max(0, min_collected),
+            min_comments=max(0, min_comments),
+            keyword=keyword,
+            page=page,
+            page_size=page_size,
         )
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -180,7 +203,29 @@ def api_export_topic_md(topic_id: str) -> Response:
     return Response(
         content=content,
         media_type="text/markdown; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=topic-pack.md; filename*=UTF-8''{quote(filename)}"
+            )
+        },
+    )
+
+
+@router.get("/watch-topics/{topic_id}/export.xlsx", dependencies=[Depends(verify_intel_service_token)])
+def api_export_topic_xlsx(topic_id: str) -> Response:
+    try:
+        name, content = intel_product.export_topic_items_excel(topic_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    filename = f"{name}-采集结果.xlsx".replace("/", "-")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=topic-items.xlsx; filename*=UTF-8''{quote(filename)}"
+            )
+        },
     )
 
 
@@ -255,6 +300,73 @@ def api_mining_insights(topic_id: str | None = None) -> dict[str, Any]:
         return intel_product.mine_dimensional_insights(topic_id=topic_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/corpus/analysis", dependencies=[Depends(verify_intel_service_token)])
+def api_corpus_analysis(
+    topic_id: str | None = None,
+    limit: int = 200,
+    batch: int = 0,
+    brief: str = "",
+) -> dict[str, Any]:
+    return analyze_corpus(
+        topic_id=topic_id,
+        limit=max(1, min(500, limit)),
+        batch=max(0, batch),
+        brief=brief,
+    )
+
+
+@router.get("/corpus/topics", dependencies=[Depends(verify_intel_service_token)])
+def api_saved_creative_topics(topic_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+    return {"items": list_saved_topics(topic_id=topic_id, limit=limit)}
+
+
+@router.post("/corpus/topics", dependencies=[Depends(verify_intel_service_token)])
+def api_save_creative_topic(body: CreativeTopicCreate) -> dict[str, Any]:
+    try:
+        return {"item": save_creative_topic(body.title, topic_id=body.topic_id, batch=body.batch)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/corpus/topics/{saved_topic_id}", dependencies=[Depends(verify_intel_service_token)])
+def api_delete_creative_topic(saved_topic_id: int) -> dict[str, bool]:
+    delete_saved_topic(saved_topic_id)
+    return {"ok": True}
+
+
+class LlmConfigUpdate(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
+class LlmTestRequest(BaseModel):
+    api_key: str | None = None
+    model: str | None = None
+    base_url: str | None = None
+
+
+@router.get("/llm/status", dependencies=[Depends(verify_intel_service_token)])
+def api_llm_status() -> dict[str, Any]:
+    from llm_client import llm_status
+
+    return llm_status(include_secret=True)
+
+
+@router.post("/llm/config", dependencies=[Depends(verify_intel_service_token)])
+def api_llm_config(body: LlmConfigUpdate) -> dict[str, Any]:
+    from llm_client import save_llm_config
+
+    return save_llm_config(api_key=body.api_key, model=body.model, base_url=body.base_url)
+
+
+@router.post("/llm/test", dependencies=[Depends(verify_intel_service_token)])
+def api_llm_test(body: LlmTestRequest) -> dict[str, Any]:
+    from llm_client import test_llm_connection
+
+    return test_llm_connection(api_key=body.api_key, model=body.model, base_url=body.base_url)
 
 
 @router.get("/suggestions", dependencies=[Depends(verify_intel_service_token)])

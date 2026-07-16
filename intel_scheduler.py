@@ -6,6 +6,7 @@ thread wakes up periodically and runs any watch topic whose interval has elapsed
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import traceback
@@ -30,6 +31,8 @@ def _loop() -> None:
 
 def start_scheduler() -> None:
     global _thread
+    if os.environ.get("INTEL_SCHEDULER_ENABLED", "").strip() != "1":
+        return
     if _thread is not None and _thread.is_alive():
         return
     _stop.clear()

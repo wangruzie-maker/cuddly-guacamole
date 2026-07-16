@@ -164,16 +164,41 @@ def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
     }
 
 
+def _cdp_reachable(*, port: int, host: str) -> bool:
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/json/version", timeout=1.2) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return False
+
+
 def login_status(*, account: str | None = None, port: int | None = None) -> dict[str, Any]:
     """Check whether current CDP session is logged in."""
+    login_port = int(port or DEFAULT_CDP_PORT)
+    login_host = DEFAULT_CDP_HOST
+    if not _cdp_reachable(port=login_port, host=login_host):
+        return {
+            "logged_in": None,
+            "reason": "cdp_unavailable",
+            "session_reusable": True,
+            "message": "Chrome 调试会话未连接，本机已登录的 Cookie 仍可复用。",
+        }
     try:
-        publisher = _get_publisher(account=account, port=port)
+        publisher = _get_publisher(account=account, port=login_port, host=login_host)
         try:
             publisher.close()
         except Exception:
             pass
-        return {"logged_in": True, "message": "小红书登录状态正常"}
+        return {"logged_in": True, "reason": "connected", "message": "小红书登录状态正常"}
     except DiscoverLoginRequired as exc:
-        return {"logged_in": False, "message": str(exc)}
+        return {"logged_in": False, "reason": "not_logged_in", "message": str(exc)}
     except Exception as exc:  # noqa: BLE001
-        return {"logged_in": False, "message": f"登录状态检测失败: {exc}"}
+        return {
+            "logged_in": None,
+            "reason": "probe_failed",
+            "session_reusable": True,
+            "message": f"登录状态检测失败: {exc}",
+        }

@@ -377,33 +377,47 @@ def generate_topic_directions(topic_id: str, *, limit: int = 5) -> dict[str, Any
         ct = item["content_type"]
         type_stats[ct] = type_stats.get(ct, 0) + 1
 
-    # Pick representative items: top by hot_score, dedupe by content_type
+    # Pick representative items: prefer unique mining angles, then unique content types
+    seen_angles: set[str] = set()
     seen_types: set[str] = set()
     picks: list[dict[str, Any]] = []
     for item in items:
+        aid = str(item.get("mining_angle") or "feature_scene")
         ct = item["content_type"]
-        if ct in seen_types and len(picks) >= limit:
+        if aid in seen_angles:
             continue
+        seen_angles.add(aid)
         seen_types.add(ct)
         picks.append(item)
         if len(picks) >= limit:
             break
     if len(picks) < limit:
         for item in items:
-            if item not in picks:
-                picks.append(item)
+            ct = item["content_type"]
+            if item in picks:
+                continue
+            if ct in seen_types and len(picks) >= max(3, limit - 1):
+                continue
+            seen_types.add(ct)
+            picks.append(item)
             if len(picks) >= limit:
                 break
 
     directions: list[dict[str, Any]] = []
+    used_angle_names: set[str] = set()
     for item in picks[:limit]:
         aid = item.get("mining_angle") or "feature_scene"
         angle_meta = _ANGLE_BY_ID.get(aid, {})
         ct = item["content_type"]
+        angle_name = angle_meta.get("name") or item.get("mining_angle_name") or ct
+        # Avoid identical angle cards back-to-back: if same angle already used, fall back to content type label
+        if angle_name in used_angle_names:
+            angle_name = f"{ct}" if ct and ct != "其他" else f"{angle_name}·补充"
+        used_angle_names.add(angle_name)
         directions.append(
             {
                 "angle_id": aid,
-                "angle_name": angle_meta.get("name") or item.get("mining_angle_name") or ct,
+                "angle_name": angle_name,
                 "content_type": ct,
                 "mechanism": angle_meta.get("mechanism") or DIRECTION_MECHANISMS.get(ct, DIRECTION_MECHANISMS["其他"]),
                 "reference_title": item.get("title") or "",
@@ -573,3 +587,22 @@ def competitor_benchmark() -> dict[str, Any]:
         "total_items": overview.get("total_items", 0),
         "total_topics": len(topics_out),
     }
+
+
+def export_topic_items_excel(topic_id: str) -> tuple[str, bytes]:
+    topic = intel_service.get_watch_topic(topic_id)
+    if not topic:
+        raise ValueError("选题不存在")
+    items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        batch = intel_service.list_topic_items(topic_id, page=page, page_size=100)
+        items.extend(batch["items"])
+        total_pages = int(batch.get("total_pages") or 0)
+        if page >= total_pages:
+            break
+        page += 1
+    from intel_excel_export import build_topic_items_excel_bytes
+
+    name = str(topic.get("name") or topic_id).replace("/", "-")
+    return name, build_topic_items_excel_bytes(name, items)

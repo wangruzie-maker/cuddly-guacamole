@@ -105,5 +105,7 @@ class XhsSearchKeywordSource:
                 "recommended_keywords": rec,
                 "sort_by": extra.get("sort_by"),
                 "note_type": extra.get("note_type"),
+                "raw_count": before_filter,
+                "eligible_count": len(items),
             },
         )

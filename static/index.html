@@ -692,22 +692,16 @@
   <div class="wrap">
     <header>
       <div class="brand">
-        <div class="logo" id="brandLogo">红</div>
+        <div class="logo" id="brandLogo">情</div>
         <div>
-          <h1 id="appTitle">社媒内容提取</h1>
-          <p class="sub" id="appSubtitle">小红书 · 关键词/账号发现 + 链接提取</p>
+          <h1 id="appTitle">社媒内容工作台</h1>
+          <p class="sub" id="appSubtitle">选题依据 → 选择性转录 → 创作选题 → 发布追踪</p>
         </div>
       </div>
-      <div class="badge" id="versionBadge">v1.12.0</div>
+      <div class="badge" id="versionBadge">v1.21.0</div>
     </header>
 
-    <nav class="platform-tabs" id="platformTabs">
-      <button type="button" class="platform-tab active" data-platform="xhs">小红书</button>
-      <button type="button" class="platform-tab" data-platform="channels">视频号</button>
-      <button type="button" class="platform-tab" data-platform="intel">内容情报</button>
-    </nav>
-
-    <section class="return-panel" id="returnPanel">
+    <section class="return-panel" id="returnPanel" hidden>
       <div class="return-head">
         <p class="return-title">数据分析 / 数据回传总览</p>
         <span class="return-platform" id="returnPlatform">小红书</span>
@@ -741,7 +735,7 @@
       </div>
     </section>
 
-    <section class="return-panel" id="monitorPanel">
+    <section class="return-panel" id="monitorPanel" hidden>
       <div class="return-head">
         <p class="return-title">批量监测 / 链接回查（查询是否已转录）</p>
       </div>
@@ -779,7 +773,7 @@
       </div>
     </section>
 
-    <div id="xhsApp">
+    <div id="xhsApp" hidden>
     <div class="grid">
       <section class="panel">
         <div class="panel-head">输入链接</div>
@@ -921,7 +915,7 @@
 
     <div id="channelsApp" hidden></div>
 
-    <div id="intelApp" hidden></div>
+    <div id="intelApp"></div>
   </div>
 
   <div class="toast" id="toast"></div>
@@ -975,7 +969,7 @@
     let pollTimer = null;
     let taskPollTimer = null;
     let currentTaskId = null;
-    let currentPlatform = 'xhs';
+    let currentPlatform = 'intel';
     const platformMetrics = {
       xhs: { count: 0, success: 0, pending: 0, failed: 0, label: '小红书' },
       channels: { count: 0, success: 0, pending: 0, failed: 0, label: '视频号' },
@@ -2040,7 +2034,7 @@
         } else if (p === 'intel') {
           logo.textContent = '情';
           logo.style.background = 'linear-gradient(135deg, var(--accent), var(--accent-2))';
-          sub.textContent = '内容情报中心 · 热点雷达 + 自有内容表现追踪';
+          sub.textContent = '选题依据 → 选择性转录 → 创作选题 → 发布追踪';
           if (window.IntelApp) window.IntelApp.init();
         } else {
           logo.textContent = '红';
@@ -2051,7 +2045,8 @@
       });
     });
   </script>
-  <script src="/static/channels.js?v=1.12.0"></script>
-  <script src="/static/intel.js?v=1.12.1"></script>
+  <script src="/static/channels.js?v=1.21.0"></script>
+  <script src="/static/intel.js?v=1.21.0"></script>
+  <script>if (window.IntelApp) window.IntelApp.init();</script>
 </body>
 </html>
