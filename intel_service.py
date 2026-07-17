@@ -27,7 +27,7 @@ from intel_db import get_conn, now_str
 
 DEFAULT_LIMIT_PER_RUN = 20
 MAX_COLLECTION_DEPTH = 200
-DISCOVER_ROUND_LIMIT = 50
+DISCOVER_ROUND_LIMIT = 100  # per sort round after search scroll merge
 XHS_SORT_POOL = ["综合", "最新", "最多点赞", "最多评论", "最多收藏"]
 MEDIA_ROOT = Path(__file__).resolve().parent / "output" / "media"
 
@@ -62,7 +62,8 @@ def _transcription_lookup() -> tuple[dict[str, dict[str, Any]], dict[str, dict[s
 
 
 def _transcription_kind(result: dict[str, Any], note_type: str) -> str:
-    if result.get("video_script"):
+    source = str(result.get("video_script_source") or "")
+    if result.get("video_script") and source not in ("desc", "desc_fallback"):
         return "视频脚本"
     if result.get("image_ocr_text"):
         return "图片 OCR"
@@ -71,6 +72,77 @@ def _transcription_kind(result: dict[str, Any], note_type: str) -> str:
     if note_type == "图文" or str(result.get("note_type") or "") == "图文":
         return "图片 OCR"
     return "正文"
+
+
+def _has_real_video_script(result: dict[str, Any]) -> bool:
+    script = str(result.get("video_script") or "").strip()
+    if not script:
+        return False
+    source = str(result.get("video_script_source") or "").strip()
+    return source not in ("desc", "desc_fallback")
+
+
+def _transcription_completeness(result: dict[str, Any], note_type: str) -> dict[str, Any]:
+    """Honest completeness: desc-only is partial, not completed."""
+    resolved = note_type or str(result.get("note_type") or "")
+    mode = str(result.get("extract_mode") or "").strip().lower()
+    has_desc = bool(str(result.get("desc") or "").strip())
+    has_title = bool(str(result.get("title") or "").strip())
+    if mode in ("simple", "basic", "title_desc"):
+        if has_desc or has_title:
+            return {"status": "completed", "label": "已完成（简单）", "level": "completed"}
+        return {"status": "none", "label": "未提取", "level": "none"}
+
+    script_status = str(result.get("video_script_status") or "none")
+    ocr_status = str(result.get("image_ocr_status") or "none")
+    has_script = _has_real_video_script(result)
+    has_ocr = bool(str(result.get("image_ocr_text") or "").strip())
+    script_source = str(result.get("video_script_source") or "")
+
+    if resolved == "视频":
+        if script_status == "pending":
+            return {"status": "running", "label": "视频脚本转写中…", "level": "running"}
+        if has_script and script_status == "done":
+            level = "completed"
+            label = "已完成（脚本）"
+            if has_ocr:
+                label = "已完成（脚本+OCR）"
+            return {"status": "completed", "label": label, "level": level}
+        if script_status == "failed" or script_source in ("desc", "desc_fallback"):
+            if has_desc:
+                return {
+                    "status": "partial",
+                    "label": "仅正文（脚本未拿到）",
+                    "level": "partial",
+                }
+            return {"status": "failed", "label": "脚本转写失败", "level": "failed"}
+        if has_desc:
+            return {"status": "partial", "label": "仅正文", "level": "partial"}
+        return {"status": "none", "label": "未转录", "level": "none"}
+
+    if resolved == "图文":
+        if ocr_status == "pending":
+            return {"status": "running", "label": "图片 OCR 中…", "level": "running"}
+        if has_ocr and ocr_status == "done":
+            return {"status": "completed", "label": "已完成（OCR）", "level": "completed"}
+        if ocr_status == "failed":
+            if has_desc:
+                return {
+                    "status": "partial",
+                    "label": "仅正文（OCR 失败）",
+                    "level": "partial",
+                }
+            return {"status": "failed", "label": "OCR 失败", "level": "failed"}
+        if has_desc:
+            return {"status": "partial", "label": "仅正文", "level": "partial"}
+        return {"status": "none", "label": "未转录", "level": "none"}
+
+    # Unknown type: require media text when present, else desc is partial.
+    if has_script or has_ocr:
+        return {"status": "completed", "label": "已完成", "level": "completed"}
+    if has_desc:
+        return {"status": "partial", "label": "仅正文", "level": "partial"}
+    return {"status": "none", "label": "未转录", "level": "none"}
 
 
 def _transcription_progress(result: dict[str, Any], note_type: str) -> dict[str, str] | None:
@@ -100,28 +172,33 @@ def _attach_transcription(
         item["transcription"] = None
         return item
     note_type = str(item.get("note_type") or result.get("note_type") or "")
+    completeness = _transcription_completeness(result, note_type)
     progress = _transcription_progress(result, note_type)
-    transcript = str(
-        result.get("video_script")
-        or result.get("image_ocr_text")
-        or result.get("desc")
-        or ""
-    ).strip()
-    kind = _transcription_kind(result, note_type)
-    status = str(result.get("status") or "")
-    if progress:
-        display_status = progress["stage"]
-    elif transcript:
-        display_status = "completed" if status == "成功" else status
+    # Prefer real media text; keep desc as fallback display only when partial/none.
+    if _has_real_video_script(result):
+        transcript = str(result.get("video_script") or "").strip()
+    elif str(result.get("image_ocr_text") or "").strip():
+        transcript = str(result.get("image_ocr_text") or "").strip()
     else:
-        display_status = "none"
+        transcript = str(result.get("desc") or "").strip()
+    kind = _transcription_kind(result, note_type)
+    if progress and progress["stage"] == "running":
+        display_status = "running"
+        label = progress["label"]
+    else:
+        display_status = completeness["status"]
+        label = completeness["label"]
     item["transcription"] = {
         "status": display_status,
+        "label": label,
         "kind": kind,
         "text": transcript[:1600],
         "truncated": len(transcript) > 1600,
-        "has_script": bool(result.get("video_script")),
-        "has_ocr": bool(result.get("image_ocr_text")),
+        "has_script": _has_real_video_script(result),
+        "has_ocr": bool(str(result.get("image_ocr_text") or "").strip()),
+        "has_desc_only": display_status == "partial",
+        "script_source": str(result.get("video_script_source") or ""),
+        "extract_mode": str(result.get("extract_mode") or ""),
         "progress": progress,
     }
     return item
@@ -372,17 +449,15 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
         min(MAX_COLLECTION_DEPTH, int(topic.get("limit_per_run") or DEFAULT_LIMIT_PER_RUN)),
     )
 
-    # 多轮采集：同一个关键词换不同排序方式（综合/最新/最多点赞…）各搜一遍。
-    # 小红书搜索接口本身不支持翻页，这是在"围绕已有选题多次搜索爆款"上唯一能
-    # 扩大覆盖面的办法——不同排序会把不同的爆款内容排到前面。
+    # 多轮采集：同一关键词换不同排序（综合/最新/最多点赞…），每轮再滚动加载搜索结果。
+    # 滚动把更多卡片灌进 __INITIAL_STATE__.search.feeds，再配合多排序扩大覆盖。
     sort_rounds = [str(s).strip() for s in (filters.get("sort_rounds") or []) if str(s).strip()]
     if not sort_rounds:
         sort_rounds = [str(filters.get("sort_by") or "综合").strip()]  # 兼容旧选题
     sort_rounds = list(dict.fromkeys(s for s in sort_rounds if s in XHS_SORT_POOL))
-    required_rounds = min(len(XHS_SORT_POOL), max(1, ceil(target_depth / DISCOVER_ROUND_LIMIT)))
+    # 把整个排序池都排进候选轮次：没凑够目标数就继续换排序挖，
+    # 凑够了会提前 break，不会白跑。
     for candidate in XHS_SORT_POOL:
-        if len(sort_rounds) >= required_rounds:
-            break
         if candidate not in sort_rounds:
             sort_rounds.append(candidate)
     note_type_filter = filters.get("note_type") or None
@@ -404,18 +479,45 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
     notes: list[str] = []
     seen_keys: set[str] = set()
 
-    for platform in topic.get("platforms") or ["xhs"]:
+    platforms = topic.get("platforms") or ["xhs"]
+    # 登录只在本次运行开头验证一次；每个搜索轮次不再重复判断，
+    # 避免"已登录却反复弹未登录"的误报。
+    xhs_login_verified = False
+    xhs_login_blocked = ""
+    if "xhs" in platforms:
+        try:
+            from xhs.cdp_bridge import login_status as _xhs_login_status
+
+            status = _xhs_login_status(account=account or None, force=True)
+            if status.get("logged_in") is True:
+                xhs_login_verified = True
+            elif status.get("logged_in") is False:
+                xhs_login_blocked = str(status.get("message") or "小红书未登录，请先完成登录再采集。")
+        except Exception:  # noqa: BLE001
+            # 状态探测失败时不拦截，交给采集轮次自行验证。
+            pass
+
+    for platform in platforms:
         source_id = "xhs_search_keyword" if platform == "xhs" else "channels_search_keyword"
+        if platform == "xhs" and xhs_login_blocked:
+            notes.append(f"[xhs] {xhs_login_blocked}")
+            continue
         for keyword, query_keywords in search_queries:
             keyword = str(keyword).strip()
             if not keyword:
                 continue
             rounds = sort_rounds if platform == "xhs" else [""]
             keyword_eligible = 0
+            keyword_new = 0
             for sort_by in rounds:
-                if keyword_eligible >= target_depth:
+                # 以「新增」而非「命中」衡量进度：重跑时旧内容只会刷新指标，
+                # 不该占掉目标额度，否则第二次运行只能捞到零星几条新语料。
+                if keyword_new >= target_depth:
                     break
-                round_limit = min(DISCOVER_ROUND_LIMIT, target_depth - keyword_eligible)
+                remaining = target_depth - keyword_new
+                # 超采：搜索结果里有相当比例是已入库/被阈值过滤的内容，
+                # 只按剩余额度请求会在第一屏就停，导致"不到20条就停了"。
+                round_limit = min(DISCOVER_ROUND_LIMIT, max(remaining * 3, 30))
                 extra = (
                     {
                         k: v
@@ -427,6 +529,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
                             "min_collected": min_collected or None,
                             "min_comments": min_comments or None,
                             "min_views": min_views or None,
+                            "skip_login_verify": xhs_login_verified or None,
                         }.items()
                         if v
                     }
@@ -548,10 +651,17 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
 
                         if is_new:
                             added += 1
+                            keyword_new += 1
                         else:
                             updated += 1
                     except Exception as exc:  # noqa: BLE001
                         errors.append(f"[{platform}/{keyword}] 处理失败: {exc}")
+
+            if platform == "xhs" and keyword_new < target_depth and keyword_eligible > 0:
+                notes.append(
+                    f"[xhs/{keyword}] {len(rounds)} 轮排序搜完仅新增 {keyword_new} 条："
+                    f"其余命中内容已在库中（会刷新指标）或被阈值过滤"
+                )
 
     message = (
         f"候选 {discovered} 条，阈值后 {eligible} 条，去重 {duplicates} 条；"

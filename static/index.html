@@ -686,6 +686,145 @@
       padding: 6px 10px !important;
       font-size: 0.78rem !important;
     }
+
+    /* ---- 动效与交互流畅度（150-300ms · 平台原生缓动） ---- */
+    html { scroll-behavior: smooth; }
+
+    button {
+      transition: transform 0.15s ease, opacity 0.15s ease,
+        box-shadow 0.2s ease, background-color 0.2s ease,
+        border-color 0.2s ease, color 0.2s ease;
+    }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:active:not(:disabled) { transform: scale(0.97); }
+    .btn-primary:hover:not(:disabled) { box-shadow: 0 12px 28px rgba(47, 123, 255, 0.32); }
+
+    @keyframes panel-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .intel-tab-panel:not([hidden]) { animation: panel-in 0.22s ease both; }
+    #intelAssetsDetail > div { animation: panel-in 0.18s ease both; }
+    #intelMiningAngles details[id^='intelAngleTopic-'][open] > div { animation: panel-in 0.18s ease both; }
+
+    #intelSuggestedTopicList [data-topic-idx] {
+      transition: background-color 0.15s ease, border-color 0.15s ease;
+    }
+    #intelSuggestedTopicList [data-topic-idx]:hover { background: var(--panel-2); }
+
+    #intelAssetsGrid > button {
+      transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    #intelAssetsGrid > button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(15, 35, 80, 0.1);
+      border-color: rgba(47, 123, 255, 0.45);
+    }
+
+    details.intel-topic-items-fold summary,
+    details summary { transition: color 0.15s ease; }
+    details summary:hover { color: var(--accent); }
+
+    @keyframes flash-bg {
+      0% { background: rgba(47, 123, 255, 0.22); }
+      100% { background: transparent; }
+    }
+    .flash-highlight { animation: flash-bg 1.6s ease both; }
+
+    .intel-topic-detail-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.95fr);
+      gap: 14px;
+      align-items: start;
+      padding: 8px 0 8px 14px;
+    }
+    .intel-topic-analysis { min-width: 0; }
+    .intel-copy-workbench {
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid rgba(47, 123, 255, 0.22);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.82);
+      box-shadow: 0 6px 18px rgba(30, 64, 175, 0.06);
+    }
+    .intel-copy-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+    .intel-copy-head > div:first-child {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .intel-copy-title {
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+    }
+    textarea.intel-copy-draft {
+      min-height: 270px;
+      padding: 11px 12px;
+      resize: vertical;
+      font-size: 13px;
+      line-height: 1.65;
+      background: var(--panel);
+    }
+    .intel-copy-history {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      max-height: 120px;
+      margin-top: 8px;
+      overflow: auto;
+    }
+    .intel-copy-message {
+      width: fit-content;
+      max-width: 88%;
+      padding: 5px 8px;
+      border-radius: 8px;
+      font-size: 11.5px;
+      line-height: 1.45;
+    }
+    .intel-copy-message.user {
+      align-self: flex-end;
+      color: #1d4ed8;
+      background: rgba(47, 123, 255, 0.1);
+    }
+    .intel-copy-message.assistant {
+      color: var(--muted);
+      background: var(--panel-2);
+    }
+    .intel-copy-chat {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: end;
+      margin-top: 8px;
+    }
+    textarea.intel-copy-instruction {
+      min-height: 66px;
+      max-height: 150px;
+      padding: 9px 10px;
+      resize: vertical;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    @media (max-width: 1180px) {
+      .intel-topic-detail-layout { grid-template-columns: 1fr; }
+      textarea.intel-copy-draft { min-height: 220px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+      html { scroll-behavior: auto; }
+    }
   </style>
 </head>
 <body>
@@ -698,7 +837,7 @@
           <p class="sub" id="appSubtitle">选题依据 → 选择性转录 → 创作选题 → 发布追踪</p>
         </div>
       </div>
-      <div class="badge" id="versionBadge">v1.22.0</div>
+      <div class="badge" id="versionBadge">v1.31.0</div>
     </header>
 
     <section class="return-panel" id="returnPanel" hidden>
@@ -2045,8 +2184,8 @@
       });
     });
   </script>
-  <script src="/static/channels.js?v=1.22.0"></script>
-  <script src="/static/intel.js?v=1.22.0"></script>
+  <script src="/static/channels.js?v=1.31.0"></script>
+  <script src="/static/intel.js?v=1.31.0"></script>
   <script>if (window.IntelApp) window.IntelApp.init();</script>
 </body>
 </html>

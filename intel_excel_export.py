@@ -36,8 +36,12 @@ def _row_value(item: dict[str, Any], key: str) -> Any:
         if progress.get("label"):
             return progress["label"]
         status = transcription.get("status") or ""
+        if transcription.get("label"):
+            return transcription["label"]
         if status == "completed":
             return "已完成"
+        if status == "partial":
+            return "仅正文"
         if status == "running":
             return "转录中"
         if status == "failed":

@@ -20,7 +20,7 @@ class XhsSearchKeywordSource:
     def param_schema(self) -> dict[str, Any]:
         return {
             "keyword": {"type": "string", "required": True, "label": "搜索关键词"},
-            "limit": {"type": "integer", "default": 20, "min": 1, "max": 50, "label": "链接数量"},
+            "limit": {"type": "integer", "default": 20, "min": 1, "max": 120, "label": "链接数量"},
             "extra.sort_by": {
                 "type": "string",
                 "enum": ["综合", "最新", "最多点赞", "最多评论", "最多收藏"],
@@ -28,6 +28,7 @@ class XhsSearchKeywordSource:
             },
             "extra.note_type": {"type": "string", "enum": ["不限", "视频", "图文"], "label": "笔记类型"},
             "extra.account": {"type": "string", "label": "CDP 账号名（可选）"},
+            "extra.max_scrolls": {"type": "integer", "default": 0, "min": 0, "max": 12, "label": "搜索滚动次数（0=自动）"},
             "extra.min_liked": {"type": "integer", "min": 0, "label": "最低点赞"},
             "extra.min_collected": {"type": "integer", "min": 0, "label": "最低收藏"},
             "extra.min_comments": {"type": "integer", "min": 0, "label": "最低评论"},
@@ -57,9 +58,17 @@ class XhsSearchKeywordSource:
             )
 
         extra = request.extra or {}
-        fetch_limit = request.limit
+        fetch_limit = max(1, min(120, int(request.limit or 20)))
         if has_metric_filters(extra):
-            fetch_limit = min(max(request.limit * 5, request.limit), 50)
+            # Overfetch then filter; scrolling raises the raw pool beyond first screen.
+            fetch_limit = min(max(request.limit * 5, request.limit), 120)
+        max_scrolls_raw = extra.get("max_scrolls")
+        max_scrolls = None
+        if max_scrolls_raw not in (None, "", 0, "0"):
+            try:
+                max_scrolls = int(max_scrolls_raw)
+            except (TypeError, ValueError):
+                max_scrolls = None
         try:
             payload = search_feeds_by_keyword(
                 keyword,
@@ -68,6 +77,10 @@ class XhsSearchKeywordSource:
                 note_type=extra.get("note_type") or None,
                 account=extra.get("account") or None,
                 port=extra.get("cdp_port"),
+                max_scrolls=max_scrolls,
+                # 上层（run_watch_topic）已在本次运行开头统一验证过登录时跳过，
+                # 避免每轮搜索都重复跳首页判断登录。
+                verify_login=not bool(extra.get("skip_login_verify")),
             )
         except DiscoverLoginRequired as exc:
             return DiscoverResult(
@@ -92,6 +105,9 @@ class XhsSearchKeywordSource:
         msg = f"找到 {len(items)} 条笔记"
         if has_metric_filters(extra) and before_filter > len(items):
             msg += f"（筛选前 {before_filter} 条）"
+        scrolls = payload.get("max_scrolls")
+        if scrolls:
+            msg += f"；滚动 {scrolls} 次"
         if rec:
             msg += f"；相关词: {', '.join(rec[:5])}"
 
@@ -107,5 +123,6 @@ class XhsSearchKeywordSource:
                 "note_type": extra.get("note_type"),
                 "raw_count": before_filter,
                 "eligible_count": len(items),
+                "max_scrolls": scrolls,
             },
         )

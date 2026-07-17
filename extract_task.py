@@ -74,6 +74,7 @@ class ExtractTaskOptions:
     cache_images: bool = False
     accumulate: bool = True
     whisper_model: str = ""
+    extract_mode: str = "full"  # full | simple
 
 
 @dataclass
@@ -180,6 +181,7 @@ def _run_task(task_id: str, urls: list[str], options: ExtractTaskOptions) -> Non
                     whisper_model=options.whisper_model or None,
                 )
                 row = result.to_dict()
+                row["extract_mode"] = options.extract_mode or "full"
                 if row.get("feed_id"):
                     batch_feed_ids.append(row["feed_id"])
                 label = row.get("title") or row.get("url") or url

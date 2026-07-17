@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 PORT=8765
-EXPECTED_VERSION="1.22.0"
+EXPECTED_VERSION="1.31.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
@@ -14,10 +14,31 @@ LOG_FILE="$DIR/output/server.log"
 
 mkdir -p "$DIR/output"
 
+# Prefer Python ≥3.10 (dataclass slots used by redbook-skills feed_explorer).
+pick_python() {
+  local cand
+  for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$cand" >/dev/null 2>&1; then
+      if "$cand" - <<'PY' >/dev/null 2>&1
+from dataclasses import dataclass
+@dataclass(slots=True)
+class _T:
+    x: int = 0
+PY
+      then
+        command -v "$cand"
+        return 0
+      fi
+    fi
+  done
+  command -v python3
+}
+PYTHON_BIN="$(pick_python)"
+
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
 
 server_mode() {
-  curl -sf "${BASE_URL}/api/health" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('mode',''))" 2>/dev/null || true
+  curl -sf "${BASE_URL}/api/health" 2>/dev/null | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin).get('mode',''))" 2>/dev/null || true
 }
 
 health_ok() {
@@ -25,7 +46,7 @@ health_ok() {
 }
 
 server_version() {
-  curl -sf "${BASE_URL}/api/health" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true
+  curl -sf "${BASE_URL}/api/health" 2>/dev/null | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || true
 }
 
 routes_ok() {
@@ -33,12 +54,12 @@ routes_ok() {
 }
 
 ensure_deps() {
-  if ! python3 -c "import fastapi" 2>/dev/null; then
-    echo "正在安装依赖..."
-    pip3 install -r requirements.txt
+  if ! "$PYTHON_BIN" -c "import fastapi" 2>/dev/null; then
+    echo "正在安装依赖 ($PYTHON_BIN)..."
+    "$PYTHON_BIN" -m pip install -r requirements.txt
   fi
-  if ! python3 -c "import playwright" 2>/dev/null; then
-    pip3 install playwright -q
+  if ! "$PYTHON_BIN" -c "import playwright" 2>/dev/null; then
+    "$PYTHON_BIN" -m pip install playwright -q
   fi
   if [[ ! -f "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell" ]]; then
     echo "首次视频号发现需下载 Chromium: ./setup_playwright.sh"
@@ -65,9 +86,9 @@ start_server() {
   ensure_deps
   kill_port
   rm -f "$DIR/output/.demo_mode"
-  echo "正在启动正式版服务 (v${EXPECTED_VERSION})..."
+  echo "正在启动正式版服务 (v${EXPECTED_VERSION}) with $PYTHON_BIN ..."
   nohup env PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
-    python3 -m uvicorn web_server:app --host 127.0.0.1 --port "$PORT" >>"$LOG_FILE" 2>&1 &
+    "$PYTHON_BIN" -m uvicorn web_server:app --host 127.0.0.1 --port "$PORT" >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
 }
 

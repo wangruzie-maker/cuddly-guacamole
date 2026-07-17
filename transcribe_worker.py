@@ -7,7 +7,6 @@ from typing import Any
 from result_store import load_results, save_results
 from video_script import transcribe_video_url
 from whisper_config import resolve_whisper_model
-from zh_text import to_simplified_chinese
 
 DEFAULT_MODEL = resolve_whisper_model(None)
 
@@ -22,7 +21,12 @@ def transcribe_stored_item(
         item["video_script_status"] = "none"
         return item
 
-    if item.get("video_script_status") == "done" and item.get("video_script"):
+    source = str(item.get("video_script_source") or "")
+    if (
+        item.get("video_script_status") == "done"
+        and item.get("video_script")
+        and source not in ("desc", "desc_fallback")
+    ):
         return item
 
     resolved = resolve_whisper_model(model_size or item.get("whisper_model"))
@@ -42,16 +46,12 @@ def transcribe_stored_item(
         item["whisper_model"] = resolved
         return item
 
-    desc = to_simplified_chinese((item.get("desc") or "").strip())
-    if desc:
-        item["video_script"] = desc
-        item["video_script_source"] = "desc"
-        item["video_script_status"] = "done"
-        return item
-
+    # Do not silently promote publish copy into "video_script done".
+    # Keep desc on the note; mark ASR as failed so UI can show 仅正文.
     item["video_script"] = ""
     item["video_script_source"] = ""
     item["video_script_status"] = "failed"
+    item["whisper_model"] = resolved
     return item
 
 

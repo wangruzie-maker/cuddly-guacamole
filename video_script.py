@@ -315,7 +315,7 @@ def build_video_script(
         text, asr_source = transcribe_video_url(video_url, model_size=model_size)
         if text:
             return text, asr_source
-        if desc.strip():
-            return to_simplified_chinese(desc.strip()), "desc"
+        # Do not fall back to publish copy as if it were ASR.
+        return "", ""
 
     return "", ""

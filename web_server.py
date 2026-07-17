@@ -60,7 +60,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 CORS_ORIGINS = [o.strip() for o in os.environ.get("APP_CORS_ORIGINS", "*").split(",") if o.strip()]
 
-app = FastAPI(title="社媒内容提取", version="1.22.0")
+app = FastAPI(title="社媒内容提取", version="1.31.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS or ["*"],
@@ -69,6 +69,30 @@ app.add_middleware(
 )
 app.include_router(channels_router)
 app.include_router(intel_router)
+
+
+@app.on_event("startup")
+def _resume_stuck_media() -> None:
+    """服务重启会丢掉进行中的后台转录/OCR 任务，遗留大量 pending。
+
+    启动后自动续跑，避免语料长期停在「部分完整」。
+    """
+    import threading
+    import time as _time
+
+    def _run() -> None:
+        _time.sleep(8)  # 等服务完全就绪，避免抢占启动期资源
+        try:
+            pending = count_pending_media()
+            if sum(pending.values()) <= 0:
+                return
+            print(f"[startup] 续跑遗留媒体任务: {pending}", flush=True)
+            stats = process_pending_media(None)
+            print(f"[startup] 媒体任务续跑完成: {stats}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[startup] 媒体任务续跑失败: {exc}", flush=True)
+
+    threading.Thread(target=_run, daemon=True, name="resume-pending-media").start()
 
 CSV_COLUMNS = [
     "链接",
@@ -100,6 +124,7 @@ class ExtractRequest(BaseModel):
     cache_images: bool = Field(False, description="下载图片素材供 Excel 嵌入")
     accumulate: bool = Field(True, description="是否累积到历史结果")
     whisper_model: str = Field("", description="Whisper 模型：tiny/base/small/medium/large-v3")
+    extract_mode: str = Field("full", description="full=完整(脚本+OCR)；simple=标题+发布文案")
 
 
 class ExportRequest(BaseModel):
@@ -281,8 +306,9 @@ def health() -> dict[str, Any]:
 def api_xhs_login_status(
     account: str | None = Query(None, description="CDP 账号名，可选"),
     cdp_port: int | None = Query(None, description="Chrome CDP 端口，默认 9222"),
+    force: bool = Query(False, description="强制刷新登录检测，忽略缓存"),
 ) -> dict[str, Any]:
-    return xhs_login_status(account=account, port=cdp_port)
+    return xhs_login_status(account=account, port=cdp_port, force=force)
 
 
 @app.post("/api/xhs/login")
@@ -630,14 +656,29 @@ def extract_notes(body: ExtractRequest) -> dict[str, Any]:
         raise HTTPException(400, "请粘贴至少一个小红书分享链接")
 
     cache_images = body.cache_images or body.ocr_images
-    options = ExtractTaskOptions(
-        transcribe_video=body.transcribe_video,
-        long_video=body.long_video,
-        ocr_images=body.ocr_images,
-        cache_images=cache_images,
-        accumulate=body.accumulate,
-        whisper_model=body.whisper_model,
-    )
+    mode = (body.extract_mode or "full").strip().lower()
+    if mode in ("simple", "basic", "title_desc"):
+        mode = "simple"
+        options = ExtractTaskOptions(
+            transcribe_video=False,
+            long_video=False,
+            ocr_images=False,
+            cache_images=False,
+            accumulate=body.accumulate,
+            whisper_model="",
+            extract_mode="simple",
+        )
+    else:
+        mode = "full"
+        options = ExtractTaskOptions(
+            transcribe_video=body.transcribe_video,
+            long_video=body.long_video,
+            ocr_images=body.ocr_images,
+            cache_images=cache_images,
+            accumulate=body.accumulate,
+            whisper_model=body.whisper_model,
+            extract_mode="full",
+        )
 
     try:
         task = start_extract_task(unique, options)

@@ -310,12 +310,103 @@ def search_corpus(
     return {"query": q, "items": items, "total": len(items), "sync": sync}
 
 
+def list_corpus_assets(
+    *,
+    q: str = "",
+    topic_id: str | None = None,
+    limit: int = 40,
+    offset: int = 0,
+    group_by: str = "date",
+) -> dict[str, Any]:
+    sync = sync_corpus_from_stores()
+    clauses: list[str] = ["(status='' OR status='成功')"]
+    params: list[Any] = []
+    query = re.sub(r"\s+", " ", q or "").strip()
+    if query:
+        like = f"%{query}%"
+        clauses.append(
+            "(title LIKE ? OR desc_text LIKE ? OR image_ocr_text LIKE ? OR video_script LIKE ? OR author LIKE ?)"
+        )
+        params.extend([like, like, like, like, like])
+    if topic_id:
+        clauses.append("watch_topic_id=?")
+        params.append(topic_id)
+    where = f"WHERE {' AND '.join(clauses)}"
+    total = int(
+        get_conn().execute(f"SELECT COUNT(*) AS c FROM corpus_items {where}", params).fetchone()["c"]
+    )
+    params.extend([max(1, min(100, limit)), max(0, offset)])
+    group_key = group_by if group_by in ("date", "topic", "type") else "date"
+    order_sql = {
+        # Keep group members contiguous so pagination doesn't split groups apart.
+        "date": "ORDER BY substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+        "topic": "ORDER BY watch_topic_id, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+        "type": "ORDER BY note_type, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+    }[group_key]
+    rows = get_conn().execute(
+        f"""SELECT id, platform, url, title, author, note_type,
+                   substr(desc_text,1,200) AS desc_preview,
+                   substr(image_ocr_text,1,120) AS ocr_preview,
+                   substr(video_script,1,120) AS script_preview,
+                   length(image_ocr_text) AS ocr_len,
+                   length(video_script) AS script_len,
+                   liked_count, watch_topic_id,
+                   substr(synced_at,1,10) AS synced_date
+            FROM corpus_items {where}
+            {order_sql}
+            LIMIT ? OFFSET ?""",
+        params,
+    ).fetchall()
+    items = []
+    for row in rows:
+        items.append(
+            {
+                "id": row["id"],
+                "platform": row["platform"],
+                "url": row["url"],
+                "title": row["title"] or "(无标题)",
+                "author": row["author"] or "",
+                "note_type": row["note_type"] or "",
+                "desc_preview": row["desc_preview"] or "",
+                "ocr_preview": row["ocr_preview"] or "",
+                "script_preview": row["script_preview"] or "",
+                "has_ocr": int(row["ocr_len"] or 0) > 0,
+                "has_script": int(row["script_len"] or 0) > 0,
+                "liked_count": row["liked_count"] or 0,
+                "watch_topic_id": row["watch_topic_id"] or "",
+                "synced_date": row["synced_date"] or "",
+            }
+        )
+    summary_row = get_conn().execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN length(image_ocr_text)>0 THEN 1 ELSE 0 END) AS with_ocr,
+                  SUM(CASE WHEN length(video_script)>0 THEN 1 ELSE 0 END) AS with_script
+           FROM corpus_items WHERE status='' OR status='成功'"""
+    ).fetchone()
+    return {
+        "query": query,
+        "items": items,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "group_by": group_key,
+        "sync": sync,
+        "summary": {
+            "total": int(summary_row["total"] or 0),
+            "with_ocr": int(summary_row["with_ocr"] or 0),
+            "with_script": int(summary_row["with_script"] or 0),
+        },
+    }
+
+
 def _extract_brief_entities(brief: str) -> dict[str, Any]:
     """Parse creative brief into short entities + intent (not paste-whole-brief titles)."""
     text = re.sub(r"\s+", " ", brief or "").strip()
     products: list[str] = []
     for match in re.finditer(
         r"(WorkBuddy|workbuddy|Codex|codex|Claude|claude|Cursor|ChatGPT|百度搭子|搭子|"
+        r"秒哒|秒搭|MIAODA|miaoda|DuMate|dumate|"
+        r"百度智能云|千帆大模型|千帆|文心一言|文心快码|文心|AppBuilder|"
         r"Agent|agent|DeepSeek|Kimi|豆包|通义|Notion|飞书)",
         text,
         re.I,
@@ -787,6 +878,21 @@ def analyze_corpus(
     suggestions = None
     llm_used = False
     llm_error = ""
+    topic_miner_meta: dict[str, Any] = {}
+    try:
+        from topic_miner_framework import build_topic_generation_context, framework_status
+
+        topic_miner_meta = {
+            **framework_status(),
+            "context_preview": build_topic_generation_context(
+                brief=brief,
+                anchors=[],
+                enable_search=False,
+            ).get("system_addendum", "")[:160],
+        }
+    except Exception as exc:  # noqa: BLE001
+        topic_miner_meta = {"skill": "viral-topic-miner", "installed": False, "error": str(exc)}
+
     # DeepSeek only when user provided a creative brief（按需求生成 / 换一批）
     if str(brief or "").strip():
         try:
@@ -815,6 +921,9 @@ def analyze_corpus(
             batch=max(0, int(batch)),
             count=6,
         )
+        for item in suggestions:
+            item.setdefault("topic_miner", "viral-topic-miner")
+            item.setdefault("content_preference", "百度搭子/秒哒/热点（弱偏好）")
 
     return {
         "scope": "topic" if topic_id else "all",
@@ -823,6 +932,7 @@ def analyze_corpus(
         "brief": brief,
         "llm_used": llm_used,
         "llm_error": llm_error,
+        "topic_miner": topic_miner_meta,
         "corpus_sync": sync_info,
         "summary": {
             "items": len(items),

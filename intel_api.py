@@ -16,6 +16,7 @@ import intel_service
 from intel_corpus import (
     analyze_corpus,
     delete_saved_topic,
+    list_corpus_assets,
     list_saved_topics,
     save_creative_topic,
     search_corpus,
@@ -85,6 +86,13 @@ class CreativeTopicCreate(BaseModel):
     title: str
     topic_id: str = ""
     batch: int = Field(0, ge=0)
+
+
+class TopicCopyRequest(BaseModel):
+    topic: dict[str, Any]
+    instruction: str = Field("", max_length=1000)
+    current_draft: str = Field("", max_length=12000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=10)
 
 
 class TopicFromTemplate(BaseModel):
@@ -338,6 +346,23 @@ def api_corpus_search(
     return search_corpus(q, topic_id=topic_id, limit=max(1, min(100, limit)))
 
 
+@router.get("/corpus/assets", dependencies=[Depends(verify_intel_service_token)])
+def api_corpus_assets(
+    q: str = "",
+    topic_id: str | None = None,
+    limit: int = 40,
+    offset: int = 0,
+    group_by: str = "date",
+) -> dict[str, Any]:
+    return list_corpus_assets(
+        q=q,
+        topic_id=topic_id,
+        limit=max(1, min(100, limit)),
+        offset=max(0, offset),
+        group_by=group_by,
+    )
+
+
 @router.get("/corpus/topics", dependencies=[Depends(verify_intel_service_token)])
 def api_saved_creative_topics(topic_id: str | None = None, limit: int = 100) -> dict[str, Any]:
     return {"items": list_saved_topics(topic_id=topic_id, limit=limit)}
@@ -349,6 +374,23 @@ def api_save_creative_topic(body: CreativeTopicCreate) -> dict[str, Any]:
         return {"item": save_creative_topic(body.title, topic_id=body.topic_id, batch=body.batch)}
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/copywriting", dependencies=[Depends(verify_intel_service_token)])
+def api_generate_topic_copy(body: TopicCopyRequest) -> dict[str, Any]:
+    from intel_copywriting import generate_topic_copy
+
+    try:
+        return generate_topic_copy(
+            topic=body.topic,
+            instruction=body.instruction,
+            current_draft=body.current_draft,
+            history=body.history,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"文案生成失败：{exc}") from exc
 
 
 @router.delete("/corpus/topics/{saved_topic_id}", dependencies=[Depends(verify_intel_service_token)])
@@ -388,6 +430,13 @@ def api_llm_test(body: LlmTestRequest) -> dict[str, Any]:
     from llm_client import test_llm_connection
 
     return test_llm_connection(api_key=body.api_key, model=body.model, base_url=body.base_url)
+
+
+@router.get("/topic-miner/status", dependencies=[Depends(verify_intel_service_token)])
+def api_topic_miner_status() -> dict[str, Any]:
+    from topic_miner_framework import framework_status
+
+    return framework_status()
 
 
 @router.get("/suggestions", dependencies=[Depends(verify_intel_service_token)])

@@ -247,12 +247,19 @@ def generate_suggested_topics_llm(
             }
         )
 
+    from topic_miner_framework import build_topic_generation_context, enrich_brief_with_profile
+
+    brief = enrich_brief_with_profile(brief)
+    miner_ctx = build_topic_generation_context(brief=brief, anchors=anchors)
+
     system = (
         "你是小红书内容策略顾问，服务市场部同事。"
         "根据创作需求和已采集爆款证据，产出可直接发布的选题标题。"
         "要求：理解需求语义，禁止把无关产品标题硬替换成需求词；"
         "每条选题必须绑定一个给定维度 angle_id；标题彼此有差异；"
         "只输出 JSON 数组，不要 Markdown。"
+        + " "
+        + str(miner_ctx.get("system_addendum") or "")
     )
     user = {
         "creative_brief": brief or "(未填写，请根据语料热点发挥)",
@@ -260,6 +267,7 @@ def generate_suggested_topics_llm(
         "batch": max(0, int(batch)),
         "need_count": count,
         "dimensions": angle_payload,
+        "topic_miner_framework": miner_ctx.get("user_addendum") or {},
         "output_schema": [
             {
                 "title": "短标题，口语化，可直接发",
@@ -267,6 +275,13 @@ def generate_suggested_topics_llm(
                 "angle": "一句话说明切入角度与依据",
                 "structure": "怎么写（人设/场景/结构）",
                 "why_viral": "为什么会爆（结合该维度机制）",
+                "miner": {
+                    "audience": "目标人群（具体到身份/处境）",
+                    "emotion": "命中的情绪或问题",
+                    "scene": "可拍场景与可见结果",
+                    "grade": "入库级|可做级|小爆候选|优先押注",
+                    "grade_reason": "评级理由，一句话",
+                },
             }
         ],
         "rules": [
@@ -275,6 +290,10 @@ def generate_suggested_topics_llm(
             "优先复用 evidence 里的爆款结构，但改写成符合 brief 的新标题",
             "同一批内 angle_id 尽量分散到不同维度",
             f"这是第 {batch} 批，请与常见模板拉开差异",
+            "对百度搭子、秒哒和相关热点保持弱偏好：只有需求/语料自然相关时采用，不要强行植入产品",
+            "若涉及百度搭子，优先真实任务交付、办公创作、浏览器执行、竞品对比与稳定性验证",
+            "若涉及秒哒，优先无代码做应用、原型到上线差距、营销场景、工具横评与踩坑验证",
+            "每条尽量隐含：目标人群 + 情绪/问题 + 可拍结果",
         ],
     }
     try:
@@ -325,6 +344,13 @@ def generate_suggested_topics_llm(
             for ev in (mining.get("top_evidence") or [])[:3]
             if ev.get("url")
         ]
+        miner_raw = item.get("miner") if isinstance(item.get("miner"), dict) else {}
+        miner_judgment = {
+            key: re.sub(r"\s+", " ", str(miner_raw.get(key) or "").strip())
+            for key in ("audience", "emotion", "scene", "grade", "grade_reason")
+        }
+        if miner_judgment.get("grade") not in ("入库级", "可做级", "小爆候选", "优先押注"):
+            miner_judgment["grade"] = ""
         results.append(
             {
                 "title": title[:48],
@@ -344,6 +370,11 @@ def generate_suggested_topics_llm(
                 },
                 "evidence": evidence,
                 "llm": True,
+                "topic_miner": "viral-topic-miner",
+                "content_preference": "百度搭子/秒哒/热点（弱偏好）",
+                "miner_judgment": (
+                    miner_judgment if any(miner_judgment.values()) else None
+                ),
             }
         )
         if len(results) >= count:
