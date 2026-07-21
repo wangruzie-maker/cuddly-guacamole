@@ -26,11 +26,24 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
 
-SKILL_ROOT = Path(
-    os.environ.get("REDBOOK_SKILLS_ROOT", "/Users/chaos/.cursor/skills/redbook-skills")
-)
+def _resolve_skill_root() -> Path:
+    env = (os.environ.get("REDBOOK_SKILLS_ROOT") or "").strip()
+    if env and Path(env).is_dir():
+        return Path(env)
+    project = Path(__file__).resolve().parent
+    for candidate in (
+        project / "vendor" / "redbook-skills",
+        project / ".cursor" / "skills" / "redbook-skills",
+        Path.home() / ".cursor" / "skills" / "redbook-skills",
+    ):
+        if candidate.is_dir() and (candidate / "scripts" / "cdp_publish.py").is_file():
+            return candidate
+    return project / "vendor" / "redbook-skills"
+
+
+SKILL_ROOT = _resolve_skill_root()
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
+if SCRIPTS_DIR.is_dir() and str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from cdp_publish import CDPError, XiaohongshuPublisher  # noqa: E402

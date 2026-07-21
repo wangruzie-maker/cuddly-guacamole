@@ -28,5 +28,6 @@ output/
 *.swp
 *.swo
 
-# Whisper models
+# Whisper models（体积大，仅完整压缩包携带；勿提交 Git）
 whisper_models/
+vendor/faster-whisper-*/

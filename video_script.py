@@ -136,16 +136,36 @@ def _whisper_cache_dir(model_size: str) -> Path:
     return Path.home() / ".cache/huggingface/hub" / f"models--Systran--faster-whisper-{model_size}"
 
 
+def _bundled_whisper_model_dir(model_size: str) -> Path | None:
+    """Prefer vendor/ model shipped inside the colleague zip package."""
+    root = Path(__file__).resolve().parent / "vendor" / f"faster-whisper-{model_size}"
+    if not root.exists():
+        return None
+    for model_bin in root.rglob("model.bin"):
+        return model_bin.parent
+    return None
+
+
+def _whisper_model_source(model_size: str) -> str:
+    """Return local model directory path, or HuggingFace model id."""
+    bundled = _bundled_whisper_model_dir(model_size)
+    if bundled is not None:
+        return str(bundled)
+    return model_size
+
+
 def get_whisper_status(model_size: str | None = None) -> dict[str, Any]:
     """Report local Whisper cache and in-memory load state."""
     resolved = resolve_whisper_model(model_size)
+    bundled = _bundled_whisper_model_dir(resolved)
     cache_dir = _whisper_cache_dir(resolved)
-    ready = cache_dir.exists() and any(cache_dir.rglob("model.bin"))
+    ready = bool(bundled) or (cache_dir.exists() and any(cache_dir.rglob("model.bin")))
     loaded = _WHISPER_MODEL is not None and _WHISPER_MODEL_SIZE == resolved
     return {
         "model": resolved,
         "ready": ready,
         "loaded": loaded,
+        "source": "bundled" if bundled else ("cache" if ready else "missing"),
     }
 
 
@@ -156,15 +176,17 @@ def _get_whisper_model(model_size: str):
 
     from faster_whisper import WhisperModel
 
+    source = _whisper_model_source(model_size)
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            _WHISPER_MODEL = WhisperModel(model_size, device="cpu", compute_type="int8")
+            _WHISPER_MODEL = WhisperModel(source, device="cpu", compute_type="int8")
             _WHISPER_MODEL_SIZE = model_size
             return _WHISPER_MODEL
         except RuntimeError as exc:
             last_error = exc
-            if attempt == 0 and "model.bin" in str(exc):
+            # Only wipe HF cache when loading by model id (not bundled path)
+            if attempt == 0 and "model.bin" in str(exc) and source == model_size:
                 shutil.rmtree(_whisper_cache_dir(model_size), ignore_errors=True)
                 continue
             raise

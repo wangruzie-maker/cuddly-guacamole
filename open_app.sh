@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 PORT=8765
-EXPECTED_VERSION="1.36.0"
+EXPECTED_VERSION="1.39.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
@@ -54,15 +54,14 @@ routes_ok() {
 }
 
 ensure_deps() {
+  # 自动模式：能力齐全则静默；仅核心缺失时才询问安装
+  if [[ -f "$DIR/ensure_capabilities.sh" ]]; then
+    PYTHON_BIN="$PYTHON_BIN" bash "$DIR/ensure_capabilities.sh" --auto || true
+  fi
   if ! "$PYTHON_BIN" -c "import fastapi" 2>/dev/null; then
-    echo "正在安装依赖 ($PYTHON_BIN)..."
-    "$PYTHON_BIN" -m pip install -r requirements.txt
-  fi
-  if ! "$PYTHON_BIN" -c "import playwright" 2>/dev/null; then
-    "$PYTHON_BIN" -m pip install playwright -q
-  fi
-  if [[ ! -f "${PLAYWRIGHT_BROWSERS_PATH}/chromium_headless_shell-1223/chrome-headless-shell-mac-arm64/chrome-headless-shell" ]]; then
-    echo "首次视频号发现需下载 Chromium: ./setup_playwright.sh"
+    echo "核心依赖仍缺失。请先双击「检测并安装能力.command」或运行:"
+    echo "  ./ensure_capabilities.sh --manual"
+    exit 1
   fi
 }
 

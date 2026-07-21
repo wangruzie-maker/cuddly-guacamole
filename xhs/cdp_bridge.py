@@ -13,17 +13,19 @@ _raw_root = os.environ.get("REDBOOK_SKILLS_ROOT", "").strip()
 SKILL_ROOT = Path(_raw_root) if _raw_root else None
 if not SKILL_ROOT or not SKILL_ROOT.is_dir():
     SKILL_ROOT = None
+    _project_root = Path(__file__).resolve().parent.parent
     for candidate in (
-        Path(__file__).resolve().parent.parent / ".cursor/skills/redbook-skills",
-        Path.home() / ".cursor/skills/redbook-skills",
+        _project_root / "vendor" / "redbook-skills",
+        _project_root / ".cursor" / "skills" / "redbook-skills",
+        Path.home() / ".cursor" / "skills" / "redbook-skills",
     ):
-        if candidate.is_dir():
+        if candidate.is_dir() and (candidate / "scripts" / "cdp_publish.py").is_file():
             SKILL_ROOT = candidate
             break
 if not SKILL_ROOT:
-    SKILL_ROOT = Path.home() / ".cursor/skills/redbook-skills"
+    SKILL_ROOT = Path(__file__).resolve().parent.parent / "vendor" / "redbook-skills"
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
+if SCRIPTS_DIR.is_dir() and str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 DEFAULT_CDP_PORT = int(os.environ.get("XHS_CDP_PORT", "9222"))

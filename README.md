@@ -6,10 +6,13 @@
 
 ```bash
 cd xhs-note-extractor
-cp .env.example .env
-pip3 install -r requirements.txt
-./open_app.sh
+cp .env.example .env   # 可选：仅 AI 文案需要填 DEEPSEEK_API_KEY
+./ensure_capabilities.sh --manual   # 推荐：看清单并同意安装
+./open_app.sh                       # 能力齐全时不会再弹安装提示
 ```
+
+也可双击 **`检测并安装能力.command`**，再双击 **`打开小红书提取工具.command`**。  
+发给同事的完整包：`./pack_full.sh`（含 Whisper + redbook-skills）。
 
 浏览器打开 `http://127.0.0.1:8765` 后直接进入统一工作台：
 
@@ -35,8 +38,8 @@ pip3 install -r requirements.txt
 
 ## 依赖说明
 
-- **小红书 CDP**：需安装 [redbook-skills](https://github.com) 到 `~/.cursor/skills/redbook-skills`
-- **视频号**：首次使用运行 `./setup_playwright.sh`
+- **小红书采集**：已内置 `vendor/redbook-skills`，首次启动同意安装依赖即可；无需再单独装 Cursor skill
+- **视频号**：可选运行 `./setup_playwright.sh`
 - **定时采集**：默认关闭以减少平台风控；需要时在 `.env` 设置 `INTEL_SCHEDULER_ENABLED=1`
 
 ## 线上部署

@@ -9,3 +9,4 @@ Pillow>=10.0.0
 zhconv>=1.4.3
 playwright>=1.40.0
 jieba>=0.42.1
+websockets>=12.0
