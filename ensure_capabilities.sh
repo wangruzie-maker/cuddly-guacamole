@@ -2,7 +2,7 @@
 # 能力检测与安装
 #   ./ensure_capabilities.sh           # 自动模式（启动工具时调用）：齐全则静默；缺失才询问安装
 #   ./ensure_capabilities.sh --manual  # 手动模式：打印清单，再决定是否安装
-set -euo pipefail
+set -eo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
@@ -30,20 +30,29 @@ OPTIONAL_MISSING=()
 STATUS_LINES=()
 
 check_import() {
-  local mod="$1"
+  local mod
+  mod="$1"
   "$PYTHON_BIN" -c "import $mod" >/dev/null 2>&1
 }
 
+# bash 3.2 + set -u 下避免 ${var:+...} / 同行 multi-local 的坑
 mark() {
-  local name="$1" state="$2" note="${3:-}"
+  local name state note suffix
+  name="${1:-}"
+  state="${2:-}"
+  note="${3:-}"
+  suffix=""
+  if [[ -n "$note" ]]; then
+    suffix=" - ${note}"
+  fi
   if [[ "$state" == "ok" ]]; then
-    STATUS_LINES+=("  ✅ $name${note:+ — $note}")
+    STATUS_LINES[${#STATUS_LINES[@]}]="  [OK] ${name}${suffix}"
   elif [[ "$state" == "optional_missing" ]]; then
-    STATUS_LINES+=("  ⚪ $name（可选，未装）${note:+ — $note}")
-    OPTIONAL_MISSING+=("$name")
+    STATUS_LINES[${#STATUS_LINES[@]}]="  [--] ${name} (optional)${suffix}"
+    OPTIONAL_MISSING[${#OPTIONAL_MISSING[@]}]="$name"
   else
-    STATUS_LINES+=("  ❌ $name（缺失）${note:+ — $note}")
-    MISSING+=("$name")
+    STATUS_LINES[${#STATUS_LINES[@]}]="  [X] ${name} (missing)${suffix}"
+    MISSING[${#MISSING[@]}]="$name"
   fi
 }
 
@@ -124,12 +133,12 @@ scan_capabilities() {
   STATUS_LINES=()
 
   local py_ver
-  py_ver="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo "?")"
-  STATUS_LINES+=("  ℹ️  当前解释器: $PYTHON_BIN (Python $py_ver)")
+  py_ver="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1]))' 2>/dev/null || echo "?")"
+  STATUS_LINES[${#STATUS_LINES[@]}]="  [i] Python: $PYTHON_BIN ($py_ver)"
   if [[ -x "$DIR/.venv/bin/python" ]]; then
-    STATUS_LINES+=("  ℹ️  使用项目虚拟环境 .venv（不受系统/uv 托管限制）")
+    STATUS_LINES[${#STATUS_LINES[@]}]="  [i] Using project .venv"
   else
-    STATUS_LINES+=("  ℹ️  尚未创建 .venv；安装时会自动创建，避免 externally-managed-environment")
+    STATUS_LINES[${#STATUS_LINES[@]}]="  [i] .venv not created yet (will create on install)"
   fi
 
   if redbook_ready; then
@@ -187,24 +196,26 @@ scan_capabilities() {
 
 print_report() {
   echo "========================================"
-  echo " 能力检测报告"
-  echo " 模式: $MODE"
+  echo " Capability check"
+  echo " Mode: $MODE"
   echo "========================================"
-  local line
-  for line in "${STATUS_LINES[@]+"${STATUS_LINES[@]}"}"; do
-    echo "$line"
+  local i
+  i=0
+  while [[ $i -lt ${#STATUS_LINES[@]} ]]; do
+    echo "${STATUS_LINES[$i]}"
+    i=$((i + 1))
   done
   echo "----------------------------------------"
   if [[ ${#MISSING[@]} -eq 0 ]]; then
-    echo "核心能力：全部就绪 ✅"
+    echo "Core capabilities: ready"
   else
-    echo "核心缺失：${#MISSING[@]} 项"
+    echo "Core missing: ${#MISSING[@]} item(s)"
   fi
   if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
-    echo "可选/受限：${#OPTIONAL_MISSING[@]} 项（不一定阻断主流程）"
+    echo "Optional/limited: ${#OPTIONAL_MISSING[@]} item(s)"
   fi
-  echo "说明：依赖一律装进项目 .venv，不再写入系统/uv 托管的 Python。"
-  echo "      TokenHub API Key 请在网页自行填写。"
+  echo "Note: packages install into project .venv (not system/uv Python)."
+  echo "      Fill TokenHub API Key in the web UI when needed."
   echo "========================================"
 }
 
@@ -263,11 +274,12 @@ do_install() {
   if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
     # 仅当缺失项包含 Playwright 时询问
     local need_pw=0
-    local item
-    for item in "${OPTIONAL_MISSING[@]+"${OPTIONAL_MISSING[@]}"}"; do
-      if [[ "$item" == *"Playwright"* ]]; then
+    local i=0
+    while [[ $i -lt ${#OPTIONAL_MISSING[@]} ]]; do
+      if [[ "${OPTIONAL_MISSING[$i]}" == *"Playwright"* ]]; then
         need_pw=1
       fi
+      i=$((i + 1))
     done
     if [[ "$need_pw" -eq 1 ]]; then
       echo ""
@@ -291,6 +303,23 @@ do_install() {
   echo "（依赖位于 .venv，与系统/uv Python 隔离。）"
 }
 
+prompt_yes_default() {
+  # macOS .command / 管道场景下 stdin 可能不是 tty；不要因 /dev/tty 失败而中断
+  local msg="$1" ans=""
+  if [[ -t 0 ]]; then
+    read -r -p "$msg" ans || true
+  else
+    # 尝试控制终端；失败则默认同意（安装场景更友好）
+    ans="$( { read -r -p "$msg" x < /dev/tty && echo "$x"; } 2>/dev/null || true )"
+    if [[ -z "$ans" ]]; then
+      echo "$msg Y（无法交互，默认同意并继续安装）"
+      ans="Y"
+    fi
+  fi
+  ans="${ans:-Y}"
+  [[ "$ans" =~ ^[Yy]$ ]]
+}
+
 # ---------- main ----------
 scan_capabilities
 
@@ -304,22 +333,15 @@ if [[ "$MODE" == "manual" ]]; then
   if [[ ${#MISSING[@]} -eq 0 ]]; then
     echo "核心已齐。若要补装可选能力，可继续。"
   fi
-  if [[ ! -t 0 ]]; then
-    echo "请在终端双击「检测并安装能力.command」或运行:"
-    echo "  ./ensure_capabilities.sh --manual"
-    exit 1
-  fi
-  read -r -p "是否现在安装/补齐？[Y/n] " ans
-  ans="${ans:-Y}"
-  if [[ ! "$ans" =~ ^[Yy]$ ]]; then
-    echo "已取消。"
+  if prompt_yes_default "是否现在安装/补齐？[Y/n] "; then
+    do_install
+    resolve_python_bin
+    scan_capabilities
+    echo ""
+    print_report
     exit 0
   fi
-  do_install
-  resolve_python_bin
-  scan_capabilities
-  echo ""
-  print_report
+  echo "已取消。"
   exit 0
 fi
 
@@ -332,21 +354,16 @@ echo ">>> 检测到核心能力缺失（共 ${#MISSING[@]} 项）。"
 echo "    建议先双击「检测并安装能力.command」查看清单；或在此直接安装。"
 echo "    安装将写入项目 .venv，可规避「externally-managed-environment / uv」报错。"
 echo ""
-for item in "${MISSING[@]+"${MISSING[@]}"}"; do
-  echo "  • $item"
+i=0
+while [[ $i -lt ${#MISSING[@]} ]]; do
+  echo "  • ${MISSING[$i]}"
+  i=$((i + 1))
 done
 echo ""
 
-if [[ ! -t 0 ]]; then
-  echo "无法交互确认。请双击「检测并安装能力.command」或运行:"
-  echo "  ./ensure_capabilities.sh --manual"
-  exit 1
-fi
-
-read -r -p "是否现在安装缺失能力？[Y/n] " ans
-ans="${ans:-Y}"
-if [[ ! "$ans" =~ ^[Yy]$ ]]; then
-  echo "已跳过。部分功能可能不可用，仍可尝试启动主界面。"
+if prompt_yes_default "是否现在安装缺失能力？[Y/n] "; then
+  do_install
   exit 0
 fi
-do_install
+echo "已跳过。部分功能可能不可用，仍可尝试启动主界面。"
+exit 0

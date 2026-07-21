@@ -33,9 +33,11 @@ PY
     then
       continue
     fi
-    ver="$("$cand" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || true)"
+    ver="$("$cand" -c 'import sys; print("%d.%d" % (sys.version_info[0], sys.version_info[1]))' 2>/dev/null || echo "0.0")"
     major="${ver%%.*}"
     minor="${ver#*.}"
+    major="${major:-0}"
+    minor="${minor:-0}"
     # 需要 ≥3.10
     if [[ "$major" -gt 3 ]] || { [[ "$major" -eq 3 ]] && [[ "$minor" -ge 10 ]]; }; then
       command -v "$cand"

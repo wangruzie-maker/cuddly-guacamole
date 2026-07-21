@@ -8,7 +8,7 @@ cd "$DIR"
 source "$DIR/python_env.sh"
 
 PORT=8765
-EXPECTED_VERSION="1.40.0"
+EXPECTED_VERSION="1.40.1"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
