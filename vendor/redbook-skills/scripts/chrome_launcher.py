@@ -119,6 +119,18 @@ def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
             return False
 
 
+def _macos_chrome_app_path(chrome_binary: str) -> str:
+    """Convert .../Google Chrome.app/Contents/MacOS/Google Chrome → .app bundle path."""
+    marker = ".app/Contents/MacOS/"
+    if marker in chrome_binary:
+        return chrome_binary.split(marker, 1)[0] + ".app"
+    for name in ("Google Chrome", "Google Chrome Beta", "Chromium", "Microsoft Edge"):
+        candidate = f"/Applications/{name}.app"
+        if os.path.isdir(candidate):
+            return candidate
+    return "/Applications/Google Chrome.app"
+
+
 def launch_chrome(
     port: int = CDP_PORT,
     headless: bool = False,
@@ -145,8 +157,7 @@ def launch_chrome(
     user_data_dir = get_user_data_dir(account)
     _current_account = account
 
-    cmd = [
-        chrome_path,
+    chrome_args = [
         f"--remote-debugging-port={port}",
         "--remote-debugging-address=127.0.0.1",
         "--remote-allow-origins=*",
@@ -159,13 +170,24 @@ def launch_chrome(
         "--disable-background-media-suspend",
         "--disable-features=Translate,MediaRouter",
     ]
-
     if headless:
-        cmd.append("--headless=new")
+        chrome_args.append("--headless=new")
+
+    # macOS: 日常 Chrome 已打开时，直接 Popen 二进制会被合并进旧进程并忽略调试参数。
+    # 用 `open -n -a xxx.app --args` 强制新实例，才能真正打开 9222。
+    use_open_n = sys.platform == "darwin" and not headless
+    if use_open_n:
+        app_path = _macos_chrome_app_path(chrome_path)
+        cmd = ["open", "-n", "-a", app_path, "--args", *chrome_args]
+        launch_label = f"open -n -a {app_path}"
+    else:
+        cmd = [chrome_path, *chrome_args]
+        launch_label = chrome_path
 
     mode_label = "headless" if headless else "headed"
     account_label = account or "default"
     print(f"[chrome_launcher] Launching Chrome ({mode_label}, account: {account_label})...")
+    print(f"  launch     : {launch_label}")
     print(f"  executable : {chrome_path}")
     print(f"  profile dir: {user_data_dir}")
     print(f"  debug port : {port}")
@@ -185,7 +207,6 @@ def launch_chrome(
         raise RuntimeError(f"无法执行 Chrome：{exc}") from exc
     _chrome_process = proc
 
-    # Wait for the debug port to become available
     deadline = time.time() + STARTUP_TIMEOUT
     while time.time() < deadline:
         if is_port_open(port):
@@ -195,8 +216,8 @@ def launch_chrome(
             except Exception:
                 pass
             return proc
-        # Chrome crashed immediately
-        if proc.poll() is not None:
+        # open -n 会立刻退出，不能据此判断 Chrome 崩溃
+        if not use_open_n and proc.poll() is not None:
             break
         time.sleep(0.5)
 
@@ -211,6 +232,12 @@ def launch_chrome(
             hint = f" Chrome 日志尾部：{tail[-500:]}"
     except Exception:
         pass
+
+    if use_open_n:
+        hint += (
+            " 若日常 Chrome 正在使用，请先菜单栏「Chrome → 完全退出」后再试；"
+            "本工具需要独立调试实例才能占用 9222 端口。"
+        )
 
     print(
         f"[chrome_launcher] WARNING: Chrome port {port} not ready "
