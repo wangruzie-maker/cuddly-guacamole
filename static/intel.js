@@ -1,4 +1,4 @@
-/* 内容情报 — 轻量能力工作台：爆款采集 / 选题分析 / 数据追踪 */
+/* 内容情报 — 轻量能力工作台：获取依据 / 选题分析 / 语料资产 */
 (function () {
   const API = '/api/intel';
   const PAGE_SIZE = 10;
@@ -20,15 +20,19 @@
   let assetsQuery = '';
   let assetsOffset = 0;
   let selectedAssetId = null;
-  let assetsGroupBy = 'date';
+  let assetsGroupBy = 'topic_date';
   let assetsTopicFilter = '';
   let assetsTopicNames = null;
+  let assetsShowAdd = false;
+  let selectedAssetIds = new Set();
+  let latestAssetItems = [];
+  let trackedOverviewChart = null;
+  let trackedDetailChart = null;
+  let selectedTrackedId = null;
+  let latestTrackedItems = [];
   let defaultTranscriptionMode = 'full'; // full | simple
   const topicTranscriptionMode = {};
-  let trackedChart = null;
-  let selectedTrackedId = null;
   let transcriptionFloatEl = null;
-
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     Object.entries(attrs || {}).forEach(([k, v]) => {
@@ -430,11 +434,9 @@
     root.appendChild(el('div', { id: 'intelTabTopics', class: 'intel-tab-panel' }));
     root.appendChild(el('div', { id: 'intelTabMining', class: 'intel-tab-panel', hidden: 'hidden' }));
     root.appendChild(el('div', { id: 'intelTabAssets', class: 'intel-tab-panel', hidden: 'hidden' }));
-    root.appendChild(el('div', { id: 'intelTabTracked', class: 'intel-tab-panel', hidden: 'hidden' }));
     renderTopicsTab();
     renderMiningTab();
     renderAssetsTab();
-    renderTrackedTab();
     switchIntelTab('topics');
     refreshLoginStatus();
   }
@@ -448,7 +450,6 @@
       ['topics', '1 获取依据'],
       ['mining', '2 选题分析'],
       ['assets', '3 语料资产'],
-      ['tracked', '4 数据追踪'],
     ].forEach(([id, label]) => {
       bar.appendChild(
         el('button', {
@@ -470,18 +471,14 @@
     document.getElementById('intelTabTopics').hidden = tab !== 'topics';
     document.getElementById('intelTabMining').hidden = tab !== 'mining';
     document.getElementById('intelTabAssets').hidden = tab !== 'assets';
-    document.getElementById('intelTabTracked').hidden = tab !== 'tracked';
     if (tab === 'mining') {
       loadCorpusAnalysis();
       loadMiningInsights();
       loadBenchmark();
     }
     if (tab === 'assets') {
-      loadAssets();
-    }
-    if (tab === 'tracked') {
-      loadTrackedCorpusSummary();
       loadTracked();
+      loadAssets();
     }
   }
 
@@ -489,9 +486,14 @@
     return el('div', {
       style: 'display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px;padding:10px 14px;border-radius:12px;background:var(--panel-2);border:1px solid var(--border);',
     }, [
-      el('span', { id: 'intelXhsStatus', class: 'hint', style: 'margin:0;' }, ['小红书：检测中…']),
-      el('button', { class: 'btn-secondary btn-small', id: 'intelXhsLoginBtn', onclick: triggerXhsLogin }, ['登录小红书']),
-      el('span', { id: 'intelChannelsStatus', class: 'hint', style: 'margin:0;' }, ['视频号：检测中…']),
+      el('span', { id: 'intelXhsStatus', class: 'hint', style: 'margin:0;' }, ['小红书：—']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        id: 'intelXhsLoginBtn',
+        type: 'button',
+        onclick: triggerXhsLogin,
+      }, ['登录小红书']),
+      el('span', { id: 'intelChannelsStatus', class: 'hint', style: 'margin:0;' }, ['视频号：—']),
       el('button', {
         class: 'btn-secondary btn-small',
         type: 'button',
@@ -506,45 +508,38 @@
     const channelsEl = document.getElementById('intelChannelsStatus');
     if (!statusEl) return;
     const cachedOk = sessionStorage.getItem(XHS_LOGIN_OK_KEY) === '1';
-    const checkedAt = Date.now();
     try {
       const resp = await fetch(force ? '/api/xhs/login-status?force=1' : '/api/xhs/login-status');
       const data = await resp.json();
       if (data.logged_in === true) {
         sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
-        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(checkedAt));
+        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
         statusEl.textContent = '小红书：已登录';
         statusEl.style.color = 'var(--ok)';
         statusEl.title = data.message || '';
-      } else if (data.logged_in === false && data.reason === 'not_logged_in') {
-        sessionStorage.removeItem(XHS_LOGIN_OK_KEY);
-        sessionStorage.removeItem(XHS_LOGIN_AT_KEY);
-        statusEl.textContent = '小红书：需登录';
-        statusEl.style.color = 'var(--err)';
-        statusEl.title = data.message || '请点击登录小红书';
-      } else if (!force && (cachedOk || data.session_reusable)) {
-        statusEl.textContent = '小红书：本机会话可用';
-        statusEl.style.color = 'var(--ok)';
-        statusEl.title = data.message || data.reason || '探测不确定，沿用本机会话';
       } else if (data.logged_in === false) {
         sessionStorage.removeItem(XHS_LOGIN_OK_KEY);
         sessionStorage.removeItem(XHS_LOGIN_AT_KEY);
-        statusEl.textContent = '小红书：需登录';
+        statusEl.textContent = '小红书：未登录';
         statusEl.style.color = 'var(--err)';
-        statusEl.title = data.message || '请点击登录小红书';
+        statusEl.title = data.message || '请点击「登录小红书」';
+      } else if (cachedOk || data.session_reusable) {
+        statusEl.textContent = '小红书：会话可用';
+        statusEl.style.color = 'var(--ok)';
+        statusEl.title = data.message || data.reason || '';
       } else {
-        statusEl.textContent = force ? '小红书：状态不明，建议重新登录' : '小红书：状态未知';
+        statusEl.textContent = '小红书：状态未知';
         statusEl.style.color = 'var(--muted)';
         statusEl.title = data.message || data.reason || '';
       }
     } catch (e) {
-      if (!force && cachedOk) {
-        statusEl.textContent = '小红书：本机会话可用';
+      if (cachedOk) {
+        statusEl.textContent = '小红书：会话可用';
         statusEl.style.color = 'var(--ok)';
         statusEl.title = e.message || '';
       } else {
-        statusEl.textContent = '小红书：检测失败';
-        statusEl.style.color = 'var(--err)';
+        statusEl.textContent = '小红书：状态未知';
+        statusEl.style.color = 'var(--muted)';
         statusEl.title = e.message || '';
       }
     }
@@ -556,44 +551,39 @@
           channelsEl.textContent = '视频号：会话就绪';
           channelsEl.style.color = 'var(--ok)';
         } else {
-          channelsEl.textContent = '视频号：API 模式（可无登录）';
+          channelsEl.textContent = '视频号：API 模式';
           channelsEl.style.color = 'var(--muted)';
         }
         channelsEl.title = data.message || '';
       } catch (e) {
-        channelsEl.textContent = '视频号：状态未知';
+        channelsEl.textContent = '视频号：—';
         channelsEl.style.color = 'var(--muted)';
         channelsEl.title = e.message || '';
       }
     }
   }
 
-  async function triggerXhsLogin(ev) {
-    const btn = ev && ev.currentTarget ? ev.currentTarget : document.getElementById('intelXhsLoginBtn');
-    if (!btn) return;
-    const old = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '唤起中…';
+  async function triggerXhsLogin() {
+    const btn = document.getElementById('intelXhsLoginBtn');
+    const old = btn ? btn.textContent : '登录小红书';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '打开中…';
+    }
     try {
-      const statusResp = await fetch('/api/xhs/login-status');
-      const status = await statusResp.json().catch(() => ({}));
-      if (status.logged_in) {
-        sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
-        sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
-        await refreshLoginStatus();
-        return;
-      }
       const loginResp = await fetch('/api/xhs/login', { method: 'POST' });
       const r = await loginResp.json().catch(() => ({}));
-      if (!loginResp.ok) throw new Error(r.detail || `触发失败 (${loginResp.status})`);
-      sessionStorage.setItem(XHS_LOGIN_OK_KEY, '1');
-      sessionStorage.setItem(XHS_LOGIN_AT_KEY, String(Date.now()));
-      setTimeout(refreshLoginStatus, 2000);
+      if (!loginResp.ok) throw new Error(r.detail || r.message || `触发失败 (${loginResp.status})`);
+      sessionStorage.setItem('intel_xhs_login_opened_at', String(Date.now()));
+      setTimeout(() => refreshLoginStatus(), 2500);
+      alert(r.message || '已打开小红书主页，请在 Chrome 窗口完成登录。');
     } catch (e) {
       alert(`登录失败：${e.message}`);
     } finally {
-      btn.disabled = false;
-      btn.textContent = old;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = old;
+      }
     }
   }
 
@@ -733,10 +723,6 @@
       el('div', {
         style: 'display:flex;gap:10px 16px;flex-wrap:wrap;align-items:center;padding-top:2px;',
       }, thresholdFields),
-      el('div', {
-        class: 'hint',
-        style: 'font-size:11.5px;line-height:1.4;margin:0;',
-      }, ['多轮排序扩大覆盖；平台返回不足时，实际候选可能低于目标条数。']),
     ]);
     body.appendChild(makeFold('筛选与采集设置', advBody, { defaultOpen: false, compact: true }));
     body.appendChild(el('p', { id: 'intelTopicCreateMsg', class: 'hint', style: 'margin:0 0 12px' }, []));
@@ -1309,15 +1295,11 @@
         delete details.dataset.loaded;
         if (details.open) loadTopicItems(topicId, 1);
       }
-      refreshLoginStatus();
       topicRunResults.set(topicId, result);
       await loadTopics();
-      const resultText = JSON.stringify(result || {});
-      if (/未登录/.test(resultText)) {
-        const goLogin = confirm('本次采集发现小红书未登录。是否打开登录窗口？完成登录后再点「运行一次」。');
-        if (goLogin) {
-          await triggerXhsLogin({ currentTarget: document.getElementById('intelXhsLoginBtn') });
-        }
+      // 登录入口只在顶栏「登录小红书」；运行一次不再打开登录页。
+      if (result && result.login_required) {
+        alert('需要先登录小红书。请点击上方「登录小红书」，在主页完成登录后再运行。');
       }
     } catch (e) {
       alert(`运行失败：${e.message}`);
@@ -1724,6 +1706,12 @@
     }
   }
 
+  function cooccurrenceEdgeWidth(count, maxCount) {
+    const ratio = Math.max(0, Math.min(1, Number(count || 0) / Math.max(1, maxCount)));
+    // 次数越多线越粗，但上限受控，避免最粗线抢画面
+    return 0.55 + Math.sqrt(ratio) * 2.45;
+  }
+
   function renderCooccurrenceNetwork(container, pairs, terms) {
     const termItems = (terms || []).slice(0, 24);
     const nodeNames = termItems.map((item) => item.term);
@@ -1795,9 +1783,10 @@
       const sameCluster = clusterByName.get(pair.source) === clusterByName.get(pair.target);
       line.setAttribute('stroke', sameCluster ? clusterColors[clusterByName.get(pair.source) % clusterColors.length] : '#a9b8cc');
       line.setAttribute('stroke-opacity', sameCluster ? '.32' : '.18');
-      line.setAttribute('stroke-width', String(.8 + Number(pair.count || 0) / maxPairCount * 2.2));
+      const edgeWidth = cooccurrenceEdgeWidth(pair.count, maxPairCount);
+      line.setAttribute('stroke-width', String(edgeWidth));
       svg.appendChild(line);
-      edgeEls.push({ line, pair });
+      edgeEls.push({ line, pair, edgeWidth });
     });
 
     const updateHighlight = () => {
@@ -1814,12 +1803,13 @@
         circle.setAttribute('stroke-width', isSelected ? '4' : '2');
       });
 
-      edgeEls.forEach(({ line, pair }) => {
+      edgeEls.forEach(({ line, pair, edgeWidth }) => {
         const active = selected.has(pair.source) || selected.has(pair.target);
         const sameCluster = clusterByName.get(pair.source) === clusterByName.get(pair.target);
         const baseColor = sameCluster ? clusterColors[clusterByName.get(pair.source) % clusterColors.length] : '#a9b8cc';
         line.setAttribute('stroke', selected.size && active ? '#ff8a3d' : baseColor);
         line.setAttribute('stroke-opacity', selected.size ? (active ? '.92' : '.05') : (sameCluster ? '.32' : '.18'));
+        line.setAttribute('stroke-width', String(selected.size && active ? edgeWidth + 0.6 : edgeWidth));
       });
       status.textContent = selected.size
         ? `已高亮：${Array.from(selected).join('、')}`
@@ -2629,20 +2619,108 @@
   }
 
   // ---------------------------------------------------------------------
-  // Tab: 语料资产
+  // Tab: 语料资产（上：数据追踪，下：资产库）
   // ---------------------------------------------------------------------
 
   function renderAssetsTab() {
     const panel = document.getElementById('intelTabAssets');
     panel.innerHTML = '';
-    const section = el('section', { class: 'panel' });
-    section.appendChild(el('div', { class: 'panel-head' }, ['语料资产']));
+
+    // --- 数据追踪（置顶） ---
+    const trackSection = el('section', { class: 'panel' });
+    trackSection.appendChild(el('div', { class: 'panel-head' }, ['数据追踪']));
+    const trackBody = el('div', { class: 'panel-body' });
+    const platformSel = el('select', { id: 'intelTrackedPlatform', style: compactInputStyle('100px') }, [
+      el('option', { value: 'xhs' }, ['小红书']),
+      el('option', { value: 'channels' }, ['视频号']),
+    ]);
+    const urlInput = el('input', {
+      id: 'intelTrackedUrl',
+      placeholder: '已发布链接',
+      style: compactInputStyle('280px'),
+    });
+    const accountInput = el('input', {
+      id: 'intelTrackedAccount',
+      placeholder: '账号名（可选）',
+      style: compactInputStyle('140px'),
+    });
+    trackBody.appendChild(el('div', {
+      style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;',
+    }, [
+      platformSel,
+      urlInput,
+      accountInput,
+      el('button', {
+        id: 'intelTrackedAddBtn',
+        class: 'btn-primary btn-small',
+        type: 'button',
+        onclick: addTrackedPost,
+      }, ['回传']),
+      el('button', { class: 'btn-secondary btn-small', type: 'button', onclick: refreshAllTracked }, ['全部刷新']),
+    ]));
+    trackBody.appendChild(el('p', {
+      id: 'intelTrackedMsg',
+      style: 'margin:0 0 8px;font-size:12px;color:var(--muted);',
+    }, []));
+    trackBody.appendChild(el('div', {
+      id: 'intelTrackedOverviewWrap',
+      style: 'margin:0 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);',
+    }, [
+      el('div', {
+        style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;',
+      }, [
+        el('div', { style: 'font-size:13px;font-weight:700;' }, ['回传总览']),
+        el('div', {
+          id: 'intelTrackedOverviewHint',
+          style: 'font-size:12px;color:var(--muted);',
+        }, ['按最新快照对比各条互动']),
+      ]),
+      el('div', { style: 'position:relative;height:220px;' }, [
+        el('canvas', { id: 'intelTrackedOverviewChart' }),
+      ]),
+    ]));
+    trackBody.appendChild(el('div', { id: 'intelTrackedTable' }, [
+      el('p', { style: 'margin:0;color:var(--muted);font-size:13px;' }, ['加载中…']),
+    ]));
+    trackBody.appendChild(el('div', {
+      id: 'intelTrackedDetailWrap',
+      style: 'margin-top:12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);display:none;',
+    }, [
+      el('div', {
+        style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;',
+      }, [
+        el('div', { id: 'intelTrackedDetailTitle', style: 'font-size:13px;font-weight:700;' }, ['单条趋势']),
+        el('button', {
+          class: 'btn-secondary btn-small',
+          type: 'button',
+          onclick: () => {
+            selectedTrackedId = null;
+            hideTrackedDetail();
+            highlightTrackedRows();
+          },
+        }, ['收起']),
+      ]),
+      el('div', {
+        id: 'intelTrackedDetailHint',
+        style: 'font-size:12px;color:var(--muted);margin-bottom:6px;',
+      }, []),
+      el('div', { style: 'position:relative;height:220px;' }, [
+        el('canvas', { id: 'intelTrackedDetailChart' }),
+      ]),
+    ]));
+    trackSection.appendChild(trackBody);
+    panel.appendChild(trackSection);
+
+    // --- 资产库 ---
+    const section = el('section', { class: 'panel', style: 'margin-top:14px;' });
+    section.appendChild(el('div', { class: 'panel-head' }, ['资产库']));
     const body = el('div', { class: 'panel-body' });
+
     const searchInput = el('input', {
       id: 'intelAssetsSearch',
       placeholder: '搜索标题 / 正文 / OCR / 脚本',
       value: assetsQuery,
-      style: compactInputStyle('260px'),
+      style: compactInputStyle('240px'),
       onkeydown: (ev) => {
         if (ev.key === 'Enter') {
           assetsQuery = searchInput.value.trim();
@@ -2652,6 +2730,7 @@
         }
       },
     });
+
     body.appendChild(el('div', {
       style: 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;',
     }, [
@@ -2671,9 +2750,7 @@
         type: 'button',
         onclick: async () => {
           try {
-            const r = await api('/corpus/sync', { method: 'POST', body: '{}' });
-            const note = document.getElementById('intelAssetsNote');
-            if (note) note.textContent = `库内 ${r.total || 0} 条`;
+            await api('/corpus/sync', { method: 'POST', body: '{}' });
             loadAssets();
           } catch (e) {
             alert(`同步失败：${e.message}`);
@@ -2681,78 +2758,167 @@
         },
       }, ['同步']),
       el('button', {
-        id: 'intelAssetsClearBtn',
         class: 'btn-secondary btn-small',
         type: 'button',
-        hidden: assetsQuery ? undefined : 'hidden',
-        onclick: () => clearAssetsSearch(),
-      }, ['清除搜索']),
-      el('label', { class: 'hint', style: 'margin:0;display:flex;align-items:center;gap:4px;' }, [
-        '分组',
-        el('select', {
-          id: 'intelAssetsGroupBy',
-          style: compactInputStyle('118px'),
-          onchange: (ev) => {
-            assetsGroupBy = ev.target.value;
-            assetsOffset = 0;
-            selectedAssetId = null;
-            loadAssets();
-          },
-        }, [
-          el('option', { value: 'date', selected: assetsGroupBy === 'date' ? 'selected' : undefined }, ['按采集日期']),
-          el('option', { value: 'topic', selected: assetsGroupBy === 'topic' ? 'selected' : undefined }, ['按所属选题']),
-          el('option', { value: 'type', selected: assetsGroupBy === 'type' ? 'selected' : undefined }, ['按内容类型']),
-        ]),
-      ]),
-      el('label', { class: 'hint', style: 'margin:0;display:flex;align-items:center;gap:4px;' }, [
-        '选题',
-        el('select', {
-          id: 'intelAssetsTopicFilter',
-          style: compactInputStyle('150px'),
-          onchange: (ev) => {
-            assetsTopicFilter = ev.target.value;
-            assetsOffset = 0;
-            selectedAssetId = null;
-            loadAssets();
-          },
-        }, [el('option', { value: '' }, ['全部选题'])]),
-      ]),
-      el('span', { id: 'intelAssetsNote', class: 'hint', style: 'margin:0;' }, []),
+        onclick: () => {
+          assetsShowAdd = !assetsShowAdd;
+          renderAssetsAddForm();
+        },
+      }, ['新增']),
+      el('select', {
+        id: 'intelAssetsTopicFilter',
+        style: compactInputStyle('150px'),
+        onchange: (ev) => {
+          assetsTopicFilter = ev.target.value;
+          assetsOffset = 0;
+          selectedAssetId = null;
+          selectedAssetIds.clear();
+          loadAssets();
+        },
+      }, [el('option', { value: '' }, ['全部选题'])]),
+      el('button', {
+        id: 'intelAssetsBulkDeleteBtn',
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        style: 'color:var(--err);',
+        disabled: 'disabled',
+        onclick: bulkDeleteSelectedAssets,
+      }, ['删除所选']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => {
+          selectedAssetIds.clear();
+          updateAssetsSelectionUI();
+          loadAssets();
+        },
+      }, ['清空选择']),
+      el('span', { id: 'intelAssetsNote', style: 'font-size:12px;color:var(--muted);margin:0;' }, []),
+      el('span', { id: 'intelAssetsSelNote', style: 'font-size:12px;color:var(--muted);margin:0;' }, []),
     ]));
-    body.appendChild(el('div', {
-      id: 'intelAssetsSummary',
-      style: 'display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;',
-    }));
-    body.appendChild(el('div', {
-      id: 'intelAssetsGrid',
-      style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;',
-    }, [el('p', { class: 'hint', style: 'margin:0;grid-column:1/-1;' }, ['加载中…'])]));
+
+    body.appendChild(el('div', { id: 'intelAssetsAddForm', style: 'margin-bottom:12px;' }));
+    body.appendChild(el('div', { id: 'intelAssetsList' }, [
+      el('p', { style: 'margin:0;color:var(--muted);font-size:13px;' }, ['加载中…']),
+    ]));
     body.appendChild(el('div', { id: 'intelAssetsDetail', style: 'margin-top:12px;' }));
-    body.appendChild(el('div', {
-      id: 'intelAssetsPager',
-      style: 'display:flex;gap:8px;align-items:center;margin-top:12px;',
-    }));
     section.appendChild(body);
     panel.appendChild(section);
+    if (assetsShowAdd) renderAssetsAddForm();
   }
 
-  function clearAssetsSearch() {
-    assetsQuery = '';
-    assetsOffset = 0;
-    selectedAssetId = null;
-    const input = document.getElementById('intelAssetsSearch');
-    if (input) input.value = '';
-    const clearBtn = document.getElementById('intelAssetsClearBtn');
-    if (clearBtn) clearBtn.hidden = true;
-    const detail = document.getElementById('intelAssetsDetail');
-    if (detail) detail.innerHTML = '';
-    loadAssets();
+  function updateAssetsSelectionUI() {
+    const btn = document.getElementById('intelAssetsBulkDeleteBtn');
+    const note = document.getElementById('intelAssetsSelNote');
+    const n = selectedAssetIds.size;
+    if (btn) btn.disabled = n ? undefined : true;
+    if (note) note.textContent = n ? `已选 ${n} 条` : '';
+    document.querySelectorAll('[data-asset-check]').forEach((box) => {
+      const id = Number(box.getAttribute('data-asset-check'));
+      box.checked = selectedAssetIds.has(id);
+    });
+    document.querySelectorAll('[data-asset-card]').forEach((card) => {
+      const id = Number(card.getAttribute('data-asset-card'));
+      const on = selectedAssetIds.has(id) || selectedAssetId === id;
+      card.style.borderColor = on ? 'var(--accent)' : 'var(--border)';
+      card.style.background = on ? 'var(--panel-2)' : 'var(--panel)';
+    });
   }
 
-  function platformLabel(platform) {
-    if (platform === 'channels') return '视频号';
-    if (platform === 'xhs') return '小红书';
-    return platform || '未知';
+  function toggleAssetSelection(id, checked) {
+    const num = Number(id);
+    if (!num) return;
+    if (checked) selectedAssetIds.add(num);
+    else selectedAssetIds.delete(num);
+    updateAssetsSelectionUI();
+  }
+
+  function setAssetIdsSelected(ids, checked) {
+    (ids || []).forEach((id) => {
+      const num = Number(id);
+      if (!num) return;
+      if (checked) selectedAssetIds.add(num);
+      else selectedAssetIds.delete(num);
+    });
+    updateAssetsSelectionUI();
+  }
+
+  function topicOptions(selectedId, includeEmpty) {
+    const opts = [];
+    if (includeEmpty) opts.push(el('option', { value: '' }, ['未关联选题']));
+    Object.entries(assetsTopicNames || {}).forEach(([id, name]) => {
+      opts.push(el('option', {
+        value: id,
+        selected: selectedId === id ? 'selected' : undefined,
+      }, [name]));
+    });
+    return opts;
+  }
+
+  function renderAssetsAddForm() {
+    const box = document.getElementById('intelAssetsAddForm');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!assetsShowAdd) return;
+    const urlInput = el('input', {
+      id: 'intelAssetsAddUrl',
+      placeholder: '粘贴小红书 / 视频号链接',
+      style: compactInputStyle('320px'),
+    });
+    const platformSel = el('select', {
+      id: 'intelAssetsAddPlatform',
+      style: compactInputStyle('100px'),
+    }, [
+      el('option', { value: 'xhs' }, ['小红书']),
+      el('option', { value: 'channels' }, ['视频号']),
+    ]);
+    const topicSel = el('select', {
+      id: 'intelAssetsAddTopic',
+      style: compactInputStyle('150px'),
+    }, topicOptions(assetsTopicFilter, true));
+    box.appendChild(el('div', {
+      style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);',
+    }, [
+      platformSel,
+      urlInput,
+      topicSel,
+      el('button', {
+        class: 'btn-primary btn-small',
+        type: 'button',
+        onclick: submitAddAsset,
+      }, ['入库']),
+      el('button', {
+        class: 'btn-secondary btn-small',
+        type: 'button',
+        onclick: () => {
+          assetsShowAdd = false;
+          renderAssetsAddForm();
+        },
+      }, ['取消']),
+    ]));
+  }
+
+  async function submitAddAsset() {
+    const url = (document.getElementById('intelAssetsAddUrl') || {}).value || '';
+    const platform = (document.getElementById('intelAssetsAddPlatform') || {}).value || 'xhs';
+    const watch_topic_id = (document.getElementById('intelAssetsAddTopic') || {}).value || '';
+    if (!url.trim()) {
+      alert('请填写链接');
+      return;
+    }
+    try {
+      const data = await api('/corpus/assets', {
+        method: 'POST',
+        body: JSON.stringify({ url: url.trim(), platform, watch_topic_id }),
+      });
+      assetsShowAdd = false;
+      selectedAssetId = data.item && data.item.id;
+      renderAssetsAddForm();
+      await loadAssets();
+      if (data.item) renderAssetDetail(data.item);
+    } catch (e) {
+      alert(`新增失败：${e.message}`);
+    }
   }
 
   async function ensureAssetsTopicNames() {
@@ -2770,49 +2936,68 @@
           }, [t.name]));
         }
       });
-    } catch (e) { /* 名称映射失败时退回显示 ID */ }
+    } catch (e) { /* ignore */ }
   }
 
   function assetTopicName(item) {
+    if (item.topic_name) return item.topic_name;
     if (!item.watch_topic_id) return '未关联选题';
     return (assetsTopicNames && assetsTopicNames[item.watch_topic_id]) || '其他选题';
   }
 
-  function assetGroupLabel(item) {
-    if (assetsGroupBy === 'topic') return assetTopicName(item);
-    if (assetsGroupBy === 'type') return item.note_type || '未知类型';
-    return item.synced_date ? `采集于 ${item.synced_date}` : '采集日期未知';
+  function platformLabel(platform) {
+    if (platform === 'channels') return '视频号';
+    if (platform === 'xhs') return '小红书';
+    return platform || '未知';
   }
 
   function renderAssetCard(item) {
-    const preview = cleanCorpusPreview(item.desc_preview || '');
     const tags = [];
     if (item.note_type) tags.push(item.note_type);
     if (item.has_script) tags.push('脚本');
     if (item.has_ocr) tags.push('OCR');
-    if (assetsGroupBy !== 'date' && item.synced_date) tags.push(item.synced_date.slice(5));
-    if (assetsGroupBy !== 'topic' && item.watch_topic_id) tags.push(assetTopicName(item).slice(0, 10));
-    const selected = selectedAssetId === item.id;
-    return el('button', {
-      type: 'button',
+    const checked = selectedAssetIds.has(item.id);
+    const active = checked || selectedAssetId === item.id;
+    const checkbox = el('input', {
+      type: 'checkbox',
+      'data-asset-check': String(item.id),
+      checked: checked ? 'checked' : undefined,
+      onclick: (ev) => {
+        ev.stopPropagation();
+        toggleAssetSelection(item.id, ev.target.checked);
+      },
+      onchange: (ev) => {
+        ev.stopPropagation();
+        toggleAssetSelection(item.id, ev.target.checked);
+      },
+    });
+    return el('div', {
+      'data-asset-card': String(item.id),
       style: [
         'display:flex;flex-direction:column;align-items:stretch;text-align:left;',
-        'padding:10px 12px;border-radius:12px;cursor:pointer;',
-        `border:1px solid ${selected ? 'var(--accent)' : 'var(--border)'};`,
-        `background:${selected ? 'var(--panel-2)' : 'var(--panel)'};`,
-        'min-height:108px;gap:6px;',
+        'padding:10px 12px;border-radius:10px;gap:6px;cursor:pointer;',
+        `border:1px solid ${active ? 'var(--accent)' : 'var(--border)'};`,
+        `background:${active ? 'var(--panel-2)' : 'var(--panel)'};`,
       ].join(''),
       onclick: () => {
         selectedAssetId = item.id;
-        loadAssets();
+        updateAssetsSelectionUI();
         renderAssetDetail(item);
       },
     }, [
       el('div', {
-        style: 'font-size:13px;font-weight:700;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;',
-      }, [item.title || '(无标题)']),
+        style: 'display:flex;align-items:flex-start;gap:8px;',
+      }, [
+        el('label', {
+          style: 'display:flex;padding-top:2px;cursor:pointer;',
+          onclick: (ev) => ev.stopPropagation(),
+        }, [checkbox]),
+        el('div', {
+          style: 'flex:1;min-width:0;font-size:13px;font-weight:700;line-height:1.4;color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;',
+        }, [item.title || '(无标题)']),
+      ]),
       el('div', {
-        style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);',
+        style: 'display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;color:var(--muted);padding-left:22px;',
       }, [
         el('span', { style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' }, [
           item.author || platformLabel(item.platform),
@@ -2820,11 +3005,11 @@
         el('span', { style: 'flex-shrink:0;font-weight:600;color:var(--text);' }, [`赞 ${fmtNum(item.liked_count || 0)}`]),
       ]),
       tags.length
-        ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;' }, tags.map((t) => el('span', {
+        ? el('div', { style: 'display:flex;gap:4px;flex-wrap:wrap;padding-left:22px;' }, tags.map((t) => el('span', {
           class: 'badge',
           style: 'font-size:10.5px;padding:2px 6px;',
         }, [t])))
-        : el('span', { style: 'font-size:11.5px;color:var(--muted);line-height:1.4;' }, [preview || '暂无摘要']),
+        : null,
     ]);
   }
 
@@ -2846,11 +3031,13 @@
               style: 'font-size:14px;font-weight:700;line-height:1.45;color:var(--accent);text-decoration:none;',
             }, [item.title || '(无标题)'])
             : el('div', { style: 'font-size:14px;font-weight:700;line-height:1.45;' }, [item.title || '(无标题)']),
-          el('div', { class: 'hint', style: 'margin-top:4px;font-size:12px;' }, [
+          el('div', {
+            style: 'margin-top:4px;font-size:12px;color:var(--muted);',
+          }, [
             `${platformLabel(item.platform)} · ${item.author || '未知作者'} · 赞 ${fmtNum(item.liked_count || 0)}`,
             item.note_type ? ` · ${item.note_type}` : '',
-            item.synced_date ? ` · 采集于 ${item.synced_date}` : '',
-            item.watch_topic_id ? ` · ${assetTopicName(item)}` : '',
+            item.synced_date ? ` · ${item.synced_date}` : '',
+            ` · ${assetTopicName(item)}`,
           ]),
         ]),
         el('button', {
@@ -2859,7 +3046,7 @@
           onclick: () => {
             selectedAssetId = null;
             box.innerHTML = '';
-            loadAssets();
+            updateAssetsSelectionUI();
           },
         }, ['收起']),
       ]),
@@ -2884,177 +3071,331 @@
     }, kids));
   }
 
+  async function bulkDeleteSelectedAssets() {
+    const ids = Array.from(selectedAssetIds);
+    if (!ids.length) return;
+    if (!confirm(`确定删除已选的 ${ids.length} 条语料？`)) return;
+    try {
+      const result = await api('/corpus/assets/bulk-delete', {
+        method: 'POST',
+        body: JSON.stringify({ ids }),
+      });
+      selectedAssetIds.clear();
+      if (selectedAssetId && ids.includes(selectedAssetId)) {
+        selectedAssetId = null;
+        const detail = document.getElementById('intelAssetsDetail');
+        if (detail) detail.innerHTML = '';
+      }
+      await loadAssets();
+      const deleted = (result && result.deleted) || ids.length;
+      const note = document.getElementById('intelAssetsNote');
+      if (note) note.textContent = `已删除 ${deleted} 条`;
+    } catch (e) {
+      alert(`删除失败：${e.message}`);
+    }
+  }
+
+  function renderAssetGrid(items) {
+    return el('div', {
+      style: 'display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;',
+    }, items.map(renderAssetCard));
+  }
+
+  function renderBatchSelectBar(label, ids) {
+    const allSelected = ids.length > 0 && ids.every((id) => selectedAssetIds.has(id));
+    return el('div', {
+      style: 'display:flex;align-items:center;gap:8px;margin:0 0 6px;',
+    }, [
+      el('label', {
+        style: 'display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none;',
+      }, [
+        el('input', {
+          type: 'checkbox',
+          checked: allSelected ? 'checked' : undefined,
+          onchange: (ev) => setAssetIdsSelected(ids, ev.target.checked),
+        }),
+        `选中本批（${ids.length}）`,
+      ]),
+      el('span', { style: 'font-size:12px;color:var(--muted);' }, [label || '']),
+    ]);
+  }
+
+  function renderTopicDateGroups(groups) {
+    const wrap = el('div', { style: 'display:flex;flex-direction:column;gap:8px;' });
+    groups.forEach((topicGroup) => {
+      const topicIds = [];
+      (topicGroup.dates || []).forEach((dateGroup) => {
+        (dateGroup.items || []).forEach((item) => topicIds.push(item.id));
+      });
+      const dateFolds = (topicGroup.dates || []).map((dateGroup) => {
+        const dateIds = (dateGroup.items || []).map((item) => item.id);
+        return makeFold(
+          `${dateGroup.date || '未知日期'} · ${dateGroup.count} 条`,
+          el('div', { style: 'display:flex;flex-direction:column;gap:8px;' }, [
+            renderBatchSelectBar('按日期', dateIds),
+            renderAssetGrid(dateGroup.items || []),
+          ]),
+          { defaultOpen: false, compact: true }
+        );
+      });
+      wrap.appendChild(makeFold(
+        `${topicGroup.topic_name || '未关联选题'} · ${topicGroup.count} 条`,
+        el('div', { style: 'display:flex;flex-direction:column;gap:6px;padding-top:4px;' }, [
+          renderBatchSelectBar('按选题整批', topicIds),
+          ...dateFolds,
+        ]),
+        { defaultOpen: false, compact: false }
+      ));
+    });
+    return wrap;
+  }
+
   async function loadAssets() {
-    const grid = document.getElementById('intelAssetsGrid');
+    const list = document.getElementById('intelAssetsList');
     const note = document.getElementById('intelAssetsNote');
-    const summaryEl = document.getElementById('intelAssetsSummary');
-    const pager = document.getElementById('intelAssetsPager');
-    const clearBtn = document.getElementById('intelAssetsClearBtn');
-    if (!grid) return;
-    if (clearBtn) clearBtn.hidden = assetsQuery ? undefined : true;
+    if (!list) return;
     if (note) note.textContent = '加载中…';
     try {
       await ensureAssetsTopicNames();
       const query = new URLSearchParams({
-        limit: '24',
-        offset: String(assetsOffset),
-        group_by: assetsGroupBy,
+        limit: '200',
+        offset: '0',
+        group_by: assetsGroupBy || 'topic_date',
       });
       if (assetsQuery) query.set('q', assetsQuery);
       if (assetsTopicFilter) query.set('topic_id', assetsTopicFilter);
       const data = await api(`/corpus/assets?${query.toString()}`);
       const items = data.items || [];
+      const groups = data.groups || [];
       const total = data.total || 0;
       const summary = data.summary || {};
+      latestAssetItems = items;
+      const valid = new Set(items.map((item) => item.id));
+      selectedAssetIds = new Set(Array.from(selectedAssetIds).filter((id) => valid.has(id)));
       if (note) {
-        note.textContent = assetsQuery
-          ? `命中 ${total} 条`
-          : `库内 ${summary.total || total} 条`;
+        const parts = [`${summary.total || total} 条`];
+        if (summary.with_script) parts.push(`脚本 ${summary.with_script}`);
+        if (summary.with_ocr) parts.push(`OCR ${summary.with_ocr}`);
+        if (assetsQuery) parts.unshift(`命中 ${total}`);
+        note.textContent = parts.join(' · ');
       }
-      if (summaryEl) {
-        summaryEl.innerHTML = '';
-        [
-          ['语料', summary.total || total],
-          ['OCR', summary.with_ocr || 0],
-          ['脚本', summary.with_script || 0],
-        ].forEach(([label, count]) => {
-          summaryEl.appendChild(el('span', { class: 'badge' }, [`${label} ${count}`]));
+
+      const sel = document.getElementById('intelAssetsTopicFilter');
+      if (sel && (data.topics || []).length && sel.options.length <= 1) {
+        (data.topics || []).forEach((t) => {
+          assetsTopicNames = assetsTopicNames || {};
+          assetsTopicNames[t.id] = t.name;
+          sel.appendChild(el('option', {
+            value: t.id,
+            selected: assetsTopicFilter === t.id ? 'selected' : undefined,
+          }, [t.name]));
         });
       }
-      grid.innerHTML = '';
+
+      list.innerHTML = '';
       if (!items.length) {
-        grid.appendChild(el('p', {
-          class: 'hint',
-          style: 'margin:0;grid-column:1/-1;',
-        }, [assetsQuery ? '没有匹配语料。' : '暂无语料，先去「获取依据」运行采集。']));
-        if (pager) pager.innerHTML = '';
+        list.appendChild(el('p', {
+          style: 'margin:0;color:var(--muted);font-size:13px;',
+        }, [assetsQuery ? '没有匹配语料' : '暂无语料']));
+        updateAssetsSelectionUI();
         return;
       }
-      let lastGroup = null;
-      items.forEach((item) => {
-        const group = assetGroupLabel(item);
-        if (group !== lastGroup) {
-          lastGroup = group;
-          grid.appendChild(el('div', {
-            style: 'grid-column:1/-1;font-size:12px;font-weight:700;color:var(--text);padding:6px 2px 0;border-bottom:1px solid var(--border);margin-bottom:2px;',
-          }, [group]));
-        }
-        grid.appendChild(renderAssetCard(item));
-      });
+
+      if (groups.length) {
+        list.appendChild(renderTopicDateGroups(groups));
+      } else {
+        list.appendChild(el('div', { style: 'display:flex;flex-direction:column;gap:8px;' }, [
+          renderBatchSelectBar('当前列表', items.map((item) => item.id)),
+          renderAssetGrid(items),
+        ]));
+      }
+
       const selected = items.find((item) => item.id === selectedAssetId);
       if (selected) renderAssetDetail(selected);
       else {
         const detail = document.getElementById('intelAssetsDetail');
         if (detail) detail.innerHTML = '';
       }
-      if (pager) {
-        pager.innerHTML = '';
-        const hasPrev = assetsOffset > 0;
-        const hasNext = assetsOffset + items.length < total;
-        if (hasPrev || hasNext) {
-          if (hasPrev) {
-            pager.appendChild(el('button', {
-              class: 'btn-secondary btn-small',
-              type: 'button',
-              onclick: () => {
-                assetsOffset = Math.max(0, assetsOffset - 24);
-                loadAssets();
-              },
-            }, ['上一页']));
-          }
-          pager.appendChild(el('span', { class: 'hint', style: 'margin:0;' }, [
-            `${assetsOffset + 1}–${assetsOffset + items.length} / ${total}`,
-          ]));
-          if (hasNext) {
-            pager.appendChild(el('button', {
-              class: 'btn-secondary btn-small',
-              type: 'button',
-              onclick: () => {
-                assetsOffset += 24;
-                loadAssets();
-              },
-            }, ['下一页']));
-          }
-        }
-      }
+      updateAssetsSelectionUI();
     } catch (e) {
-      grid.innerHTML = '';
+      list.innerHTML = '';
       if (note) note.textContent = '';
-      grid.appendChild(el('p', {
-        class: 'hint',
-        style: 'margin:0;grid-column:1/-1;color:var(--err);',
+      list.appendChild(el('p', {
+        style: 'margin:0;color:var(--err);font-size:13px;',
       }, [`加载失败：${e.message}`]));
-      if (pager) pager.innerHTML = '';
     }
   }
 
-  // ---------------------------------------------------------------------
-  // Tab: 数据追踪
-  // ---------------------------------------------------------------------
-
-  function renderTrackedTab() {
-    const panel = document.getElementById('intelTabTracked');
-    panel.innerHTML = '';
-
-    const corpusSection = el('section', { class: 'panel' });
-    corpusSection.appendChild(el('div', { class: 'panel-head' }, ['语料资产概览']));
-    corpusSection.appendChild(el('div', { class: 'panel-body', id: 'intelTrackedCorpusSummary' }, [
-      el('p', { class: 'hint' }, ['加载中…']),
-    ]));
-    panel.appendChild(corpusSection);
-
-    const section = el('section', { class: 'panel' });
-    section.style.marginTop = '14px';
-    section.appendChild(el('div', { class: 'panel-head' }, ['已发布作品追踪']));
-    const body = el('div', { class: 'panel-body' });
-
-    body.appendChild(el('p', { class: 'hint', style: 'margin:0 0 10px;' }, [
-      '粘贴已发布的小红书/视频号链接，系统会定期抓取转赞评藏数据。点击表格行查看表现趋势图。',
-    ]));
-
-    const platformSel = el('select', { id: 'intelTrackedPlatform', style: inputStyle('100px') }, [
-      el('option', { value: 'xhs' }, ['小红书']),
-      el('option', { value: 'channels' }, ['视频号']),
-    ]);
-    const urlInput = el('input', { id: 'intelTrackedUrl', placeholder: '发布后的笔记/视频链接', style: inputStyle('280px') });
-    const accountInput = el('input', { id: 'intelTrackedAccount', placeholder: '账号名（可选）', style: inputStyle('140px') });
-    body.appendChild(
-      el('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;' }, [
-        platformSel, urlInput, accountInput,
-        el('button', { class: 'btn-primary btn-small', onclick: addTrackedPost }, ['添加并抓取']),
-        el('button', { class: 'btn-secondary btn-small', onclick: refreshAllTracked }, ['全部刷新']),
-      ])
-    );
-    body.appendChild(el('p', { id: 'intelTrackedMsg', class: 'hint', style: 'margin:0 0 10px;' }, []));
-    body.appendChild(el('div', { id: 'intelTrackedTable' }, [el('p', { class: 'hint' }, ['加载中…'])]));
-    body.appendChild(el('canvas', { id: 'intelTrackedChart', height: '100', style: 'margin-top:14px;max-height:220px;' }));
-    body.appendChild(el('p', { id: 'intelTrackedChartHint', class: 'hint', style: 'margin-top:8px;' }, [
-      '点击上方列表中的内容，查看点赞/收藏/评论/分享趋势。',
-    ]));
-    section.appendChild(body);
-    panel.appendChild(section);
+  // --- 数据追踪 ---
+  function trackedMetric(post) {
+    const m = post.metrics || {};
+    return {
+      liked: Number(m.liked_count || m.liked || post.latest_liked || 0),
+      collected: Number(m.collected_count || m.collected || post.latest_collected || 0),
+      comment: Number(m.comment_count || m.comment || post.latest_comment || 0),
+      share: Number(m.share_count || m.share || post.latest_share || 0),
+    };
   }
 
-  async function loadTrackedCorpusSummary() {
-    const container = document.getElementById('intelTrackedCorpusSummary');
-    if (!container) return;
-    try {
-      const data = await api('/corpus/analysis');
-      const summary = data.summary || {};
-      container.innerHTML = '';
-      container.appendChild(el('div', {
-        style: 'display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;',
-      }, [
-        el('span', { class: 'badge' }, [`语料 ${summary.items || 0}`]),
-        el('span', { class: 'badge' }, [`小红书 ${summary.xhs || 0}`]),
-        el('span', { class: 'badge' }, [`视频号 ${summary.channels || 0}`]),
-        el('span', { class: 'badge' }, [`视频脚本 ${summary.with_script || 0}`]),
-        el('span', { class: 'badge' }, [`图片 OCR ${summary.with_ocr || 0}`]),
-      ]));
-    } catch (e) {
-      container.innerHTML = '';
-      container.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`加载失败：${e.message}`]));
+  function trackedLabel(post) {
+    const raw = (post.title || post.account_name || post.url || `内容${post.id}`).trim();
+    return raw.length > 14 ? `${raw.slice(0, 14)}…` : raw;
+  }
+
+  function destroyTrackedCharts() {
+    if (trackedOverviewChart) {
+      trackedOverviewChart.destroy();
+      trackedOverviewChart = null;
     }
+    if (trackedDetailChart) {
+      trackedDetailChart.destroy();
+      trackedDetailChart = null;
+    }
+  }
+
+  function hideTrackedDetail() {
+    const wrap = document.getElementById('intelTrackedDetailWrap');
+    if (wrap) wrap.style.display = 'none';
+    if (trackedDetailChart) {
+      trackedDetailChart.destroy();
+      trackedDetailChart = null;
+    }
+  }
+
+  function highlightTrackedRows() {
+    document.querySelectorAll('[data-tracked-row]').forEach((tr) => {
+      const id = Number(tr.getAttribute('data-tracked-row'));
+      tr.style.background = selectedTrackedId === id ? 'var(--panel-2)' : '';
+    });
+  }
+
+  async function renderTrackedOverview(items) {
+    const canvas = document.getElementById('intelTrackedOverviewChart');
+    const hint = document.getElementById('intelTrackedOverviewHint');
+    const wrap = document.getElementById('intelTrackedOverviewWrap');
+    if (!canvas) return;
+    await ensureChartJs();
+    if (trackedOverviewChart) {
+      trackedOverviewChart.destroy();
+      trackedOverviewChart = null;
+    }
+    if (!items.length) {
+      if (wrap) wrap.style.display = 'none';
+      return;
+    }
+    if (wrap) wrap.style.display = '';
+
+    const palette = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4', '#84cc16', '#f97316'];
+    const top = items.slice(0, 8);
+    const histories = await Promise.all(top.map(async (post) => {
+      try {
+        const data = await api(`/tracked/${post.id}/history`);
+        return { post, snapshots: data.items || [] };
+      } catch (e) {
+        return { post, snapshots: [] };
+      }
+    }));
+    const withHistory = histories.filter(({ snapshots }) => snapshots.length);
+    if (!withHistory.length) {
+      if (hint) hint.textContent = '暂无历史快照，点「全部刷新」后查看时间趋势';
+      return;
+    }
+
+    const timeSet = new Set();
+    withHistory.forEach(({ snapshots }) => {
+      snapshots.forEach((s) => {
+        if (s.captured_at) timeSet.add(s.captured_at);
+      });
+    });
+    const timeKeys = Array.from(timeSet).sort();
+    const labels = timeKeys.map((t) => t.slice(5, 16));
+
+    let datasets = [];
+    const activePosts = withHistory.filter(({ post }) => !post.last_error);
+    if (activePosts.length === 1) {
+      const snapshots = activePosts[0].snapshots;
+      const snapLabels = snapshots.map((s) => (s.captured_at || '').slice(5, 16));
+      datasets = [
+        { label: '赞', data: snapshots.map((s) => s.liked_count || 0), borderColor: '#3b82f6', tension: 0.25, pointRadius: 3 },
+        { label: '藏', data: snapshots.map((s) => s.collected_count || 0), borderColor: '#10b981', tension: 0.25, pointRadius: 3 },
+        { label: '评', data: snapshots.map((s) => s.comment_count || 0), borderColor: '#f59e0b', tension: 0.25, pointRadius: 3 },
+        { label: '转', data: snapshots.map((s) => s.share_count || 0), borderColor: '#8b5cf6', tension: 0.25, pointRadius: 3 },
+      ];
+      if (hint) hint.textContent = `${snapLabels.length} 个时间点 · 点击表格行看单条详情`;
+      trackedOverviewChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels: snapLabels, datasets },
+        options: trackedLineChartOptions({ onClickPost: activePosts[0].post }),
+      });
+      return;
+    }
+
+    datasets = activePosts.map(({ post, snapshots }, idx) => {
+      const byTime = new Map(snapshots.map((s) => [s.captured_at, s]));
+      let lastVal = null;
+      const data = timeKeys.map((t) => {
+        const snap = byTime.get(t);
+        if (snap) lastVal = Number(snap.liked_count || 0);
+        return lastVal;
+      });
+      const color = palette[idx % palette.length];
+      return {
+        label: trackedLabel(post),
+        data,
+        borderColor: color,
+        backgroundColor: `${color}22`,
+        tension: 0.25,
+        pointRadius: 2,
+        spanGaps: true,
+      };
+    });
+
+    if (hint) {
+      hint.textContent = items.length > 8
+        ? `时间轴 · 展示 ${activePosts.length} / ${items.length} 条（赞）`
+        : `时间轴 · 共 ${activePosts.length} 条（赞）`;
+    }
+
+    trackedOverviewChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels, datasets },
+      options: trackedLineChartOptions({
+        onClickPost: (idx) => {
+          const target = activePosts[idx];
+          if (target) showTrackedHistory(target.post);
+        },
+        clickByDatasetIndex: true,
+      }),
+    });
+  }
+
+  function trackedLineChartOptions(opts) {
+    const options = opts || {};
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: { mode: 'index', intersect: false },
+      },
+      scales: {
+        x: {
+          title: { display: true, text: '时间', font: { size: 11 } },
+          ticks: { maxRotation: 35, minRotation: 0, font: { size: 10 } },
+        },
+        y: { beginAtZero: true, title: { display: true, text: '互动量', font: { size: 11 } } },
+      },
+      onClick: (evt, elements) => {
+        if (!elements.length || !options.onClickPost) return;
+        const el = elements[0];
+        if (options.clickByDatasetIndex) {
+          options.onClickPost(el.datasetIndex);
+        } else {
+          options.onClickPost();
+        }
+      },
+    };
   }
 
   async function loadTracked() {
@@ -3063,149 +3404,252 @@
     try {
       const data = await api('/tracked');
       const items = data.items || [];
+      latestTrackedItems = items;
       tableEl.innerHTML = '';
       if (!items.length) {
-        tableEl.appendChild(el('p', { class: 'hint' }, ['还没有追踪内容，在上方添加发布链接。']));
+        destroyTrackedCharts();
+        hideTrackedDetail();
+        const wrap = document.getElementById('intelTrackedOverviewWrap');
+        if (wrap) wrap.style.display = 'none';
+        tableEl.appendChild(el('p', {
+          style: 'margin:0;color:var(--muted);font-size:13px;',
+        }, ['暂无追踪内容，粘贴已发布链接后点「回传」']));
         return;
       }
-      const table = el('table', { class: 'show' });
-      table.appendChild(el('thead', {}, [el('tr', {}, [
-        el('th', {}, ['平台']), el('th', {}, ['标题']), el('th', {}, ['转']), el('th', {}, ['赞']),
-        el('th', {}, ['评']), el('th', {}, ['藏']), el('th', {}, ['最近刷新']), el('th', {}, ['操作']),
-      ])]));
+      await renderTrackedOverview(items);
+
+      const table = el('table', { class: 'show', style: 'width:100%;border-collapse:collapse;font-size:12.5px;' });
+      table.appendChild(el('thead', {}, [
+        el('tr', {}, ['账号', '标题', '赞', '藏', '评', '转', '刷新', ''].map((h) => el('th', {
+          style: 'text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);color:var(--muted);font-weight:600;',
+        }, [h]))),
+      ]));
       const tbody = el('tbody');
       items.forEach((post) => {
-        const m = postMetrics(post);
-        const err = post.last_error;
+        const m = trackedMetric(post);
         const tr = el('tr', {
-          style: 'cursor:pointer;',
-          onclick: (ev) => {
-            if (ev.target.closest('button')) return;
-            showTrackedHistory(post);
-          },
+          'data-tracked-row': String(post.id),
+          style: `cursor:pointer;${selectedTrackedId === post.id ? 'background:var(--panel-2);' : ''}`,
+          title: '点击查看该条互动趋势',
+          onclick: () => showTrackedHistory(post),
         }, [
-          el('td', {}, [post.platform === 'xhs' ? '小红书' : '视频号']),
-          el('td', {}, [
-            el('a', { href: post.url, target: '_blank', style: 'color:var(--accent);', onclick: (e) => e.stopPropagation() }, [
-              post.title || post.url,
-            ]),
-            err ? el('div', { style: 'font-size:11px;color:var(--err);margin-top:2px;' }, [err.slice(0, 60)]) : null,
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);' }, [post.account_name || '-']),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);max-width:240px;' }, [
+            (post.title || post.url || '-').slice(0, 42),
           ]),
-          el('td', {}, [fmtNum(m.share)]),
-          el('td', { style: 'font-weight:600;color:var(--accent);' }, [fmtNum(m.liked)]),
-          el('td', {}, [fmtNum(m.comment)]),
-          el('td', {}, [fmtNum(m.collected)]),
-          el('td', { style: 'font-size:11.5px;color:var(--muted);' }, [post.last_refreshed_at || '-']),
-          el('td', { style: 'display:flex;gap:4px;', onclick: (e) => e.stopPropagation() }, [
-            el('button', { class: 'btn-secondary btn-small', onclick: () => refreshTracked(post.id) }, ['刷新']),
-            el('button', { class: 'btn-danger btn-small', onclick: () => deleteTracked(post.id) }, ['删除']),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);' }, [fmtNum(m.liked)]),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);' }, [fmtNum(m.collected)]),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);' }, [fmtNum(m.comment)]),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);' }, [fmtNum(m.share)]),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);color:var(--muted);font-size:11.5px;' }, [
+            post.last_refreshed_at || '-',
+          ]),
+          el('td', { style: 'padding:7px 8px;border-bottom:1px solid var(--border);white-space:nowrap;' }, [
+            el('button', {
+              class: 'btn-secondary btn-small',
+              type: 'button',
+              style: 'padding:2px 8px;font-size:11px;margin-right:4px;',
+              onclick: (ev) => { ev.stopPropagation(); refreshTracked(post.id); },
+            }, ['刷新']),
+            el('button', {
+              class: 'btn-secondary btn-small',
+              type: 'button',
+              style: 'padding:2px 8px;font-size:11px;color:var(--err);',
+              onclick: (ev) => { ev.stopPropagation(); deleteTracked(post.id); },
+            }, ['删']),
           ]),
         ]);
-        if (selectedTrackedId === post.id) tr.style.background = 'var(--panel-2)';
         tbody.appendChild(tr);
+        if (post.last_error) {
+          tbody.appendChild(el('tr', {}, [
+            el('td', {
+              colspan: '8',
+              style: 'padding:0 8px 8px;color:var(--err);font-size:11.5px;border-bottom:1px solid var(--border);',
+            }, [String(post.last_error).slice(0, 180)]),
+          ]));
+        }
       });
       table.appendChild(tbody);
       tableEl.appendChild(table);
+
+      if (selectedTrackedId) {
+        const selected = items.find((p) => p.id === selectedTrackedId);
+        if (selected) await showTrackedHistory(selected, { keepSelection: true });
+        else hideTrackedDetail();
+      }
     } catch (e) {
       tableEl.innerHTML = '';
-      tableEl.appendChild(el('p', { class: 'hint', style: 'color:var(--err);' }, [`加载失败：${e.message}`]));
+      tableEl.appendChild(el('p', {
+        style: 'margin:0;color:var(--err);font-size:13px;',
+      }, [`加载失败：${e.message}`]));
     }
   }
 
-  async function showTrackedHistory(post) {
+  async function showTrackedHistory(post, opts) {
+    if (!post || !post.id) return;
     selectedTrackedId = post.id;
-    const hint = document.getElementById('intelTrackedChartHint');
-    if (hint) hint.textContent = `趋势图：${post.title || post.url}`;
-    await loadTracked();
+    if (!(opts && opts.keepSelection)) highlightTrackedRows();
+
+    const wrap = document.getElementById('intelTrackedDetailWrap');
+    const titleEl = document.getElementById('intelTrackedDetailTitle');
+    const hintEl = document.getElementById('intelTrackedDetailHint');
+    const canvas = document.getElementById('intelTrackedDetailChart');
+    if (!canvas) return;
+    if (wrap) {
+      wrap.style.display = '';
+      wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+    if (titleEl) titleEl.textContent = (post.title || '单条趋势').slice(0, 40);
+    if (hintEl) {
+      hintEl.style.color = 'var(--muted)';
+      hintEl.textContent = '加载趋势中…';
+    }
+
     try {
-      const data = await api(`/tracked/${post.id}/history`);
-      const history = data.items || [];
       await ensureChartJs();
-      const ctx = document.getElementById('intelTrackedChart');
-      if (!ctx) return;
-      if (trackedChart) trackedChart.destroy();
-      if (!history.length) {
-        if (hint) hint.textContent = '暂无历史快照，点「刷新」后再查看趋势。';
+      const data = await api(`/tracked/${post.id}/history`);
+      const items = data.items || [];
+      if (trackedDetailChart) {
+        trackedDetailChart.destroy();
+        trackedDetailChart = null;
+      }
+      if (!items.length) {
+        if (hintEl) {
+          hintEl.style.color = 'var(--muted)';
+          hintEl.textContent = '暂无历史快照。点「刷新」后再看趋势。';
+        }
         return;
       }
-      trackedChart = new Chart(ctx, {
+      if (hintEl) {
+        hintEl.style.color = 'var(--muted)';
+        hintEl.textContent = `${items.length} 个快照 · ${post.account_name || platformLabel(post.platform) || ''}`;
+      }
+      const labels = items.map((s) => (s.captured_at || '').slice(5, 16));
+      trackedDetailChart = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
-          labels: history.map((h) => (h.captured_at || '').slice(5, 16)),
+          labels,
           datasets: [
-            { label: '点赞', data: history.map((h) => h.liked_count), borderColor: '#2f7bff', tension: 0.25 },
-            { label: '收藏', data: history.map((h) => h.collected_count), borderColor: '#22b07d', tension: 0.25 },
-            { label: '评论', data: history.map((h) => h.comment_count), borderColor: '#eb9a2b', tension: 0.25 },
-            { label: '分享', data: history.map((h) => h.share_count), borderColor: '#eb5757', tension: 0.25 },
+            { label: '赞', data: items.map((s) => s.liked_count || 0), borderColor: '#3b82f6', tension: 0.25, pointRadius: 3 },
+            { label: '藏', data: items.map((s) => s.collected_count || 0), borderColor: '#10b981', tension: 0.25, pointRadius: 3 },
+            { label: '评', data: items.map((s) => s.comment_count || 0), borderColor: '#f59e0b', tension: 0.25, pointRadius: 3 },
+            { label: '转', data: items.map((s) => s.share_count || 0), borderColor: '#8b5cf6', tension: 0.25, pointRadius: 3 },
           ],
         },
-        options: { responsive: true, plugins: { legend: { position: 'bottom' } } },
+        options: trackedLineChartOptions(),
       });
     } catch (e) {
-      if (hint) hint.textContent = `趋势加载失败：${e.message}`;
+      if (hintEl) {
+        hintEl.style.color = 'var(--err)';
+        hintEl.textContent = `趋势加载失败：${e.message}`;
+      }
     }
   }
 
   async function addTrackedPost() {
-    const msgEl = document.getElementById('intelTrackedMsg');
-    const platform = document.getElementById('intelTrackedPlatform').value;
-    const url = document.getElementById('intelTrackedUrl').value.trim();
-    const account_name = (document.getElementById('intelTrackedAccount').value || '').trim();
-    if (!url) { msgEl.textContent = '请填写链接'; return; }
-    msgEl.textContent = '抓取中…';
+    const platform = (document.getElementById('intelTrackedPlatform') || {}).value || 'xhs';
+    const url = ((document.getElementById('intelTrackedUrl') || {}).value || '').trim();
+    const account_name = ((document.getElementById('intelTrackedAccount') || {}).value || '').trim();
+    const msg = document.getElementById('intelTrackedMsg');
+    const btn = document.getElementById('intelTrackedAddBtn');
+    if (!url) {
+      alert('请填写链接');
+      return;
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '回传中…';
+    }
+    if (msg) {
+      msg.style.color = 'var(--muted)';
+      msg.textContent = '正在抓取互动数据…';
+    }
     try {
-      const post = await api('/tracked', { method: 'POST', body: JSON.stringify({ platform, url, account_name }) });
-      document.getElementById('intelTrackedUrl').value = '';
-      const m = postMetrics(post);
-      if (post.last_error) {
-        msgEl.textContent = `已添加，但抓取失败：${post.last_error}`;
-        msgEl.style.color = 'var(--err)';
-      } else {
-        msgEl.textContent = `已添加 · 赞 ${fmtNum(m.liked)} 藏 ${fmtNum(m.collected)} 评 ${fmtNum(m.comment)}`;
-        msgEl.style.color = 'var(--ok)';
-      }
+      const post = await api('/tracked', {
+        method: 'POST',
+        body: JSON.stringify({ platform, url, account_name }),
+      });
+      const urlEl = document.getElementById('intelTrackedUrl');
+      if (urlEl) urlEl.value = '';
+      if (post && post.id) selectedTrackedId = post.id;
       await loadTracked();
-      if (post.id) showTrackedHistory(post);
+      if (post && post.last_error) {
+        if (msg) {
+          msg.style.color = 'var(--err)';
+          msg.textContent = `已登记，但抓取失败：${post.last_error}`;
+        }
+        alert(`已添加，但抓取指标失败：${post.last_error}`);
+      } else if (msg) {
+        msg.style.color = 'var(--ok)';
+        msg.textContent = `已回传：${(post && post.title) || url}`;
+      }
+      if (post && !post.last_error) await showTrackedHistory(post);
     } catch (e) {
-      msgEl.textContent = `失败：${e.message}`;
-      msgEl.style.color = 'var(--err)';
+      if (msg) {
+        msg.style.color = 'var(--err)';
+        msg.textContent = `回传失败：${e.message}`;
+      }
+      alert(`添加失败：${e.message}`);
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '回传';
+      }
     }
   }
 
   async function refreshTracked(postId) {
     try {
       const post = await api(`/tracked/${postId}/refresh`, { method: 'POST' });
+      selectedTrackedId = postId;
       await loadTracked();
-      if (post.last_error) alert(`刷新失败：${post.last_error}`);
-      else showTrackedHistory(post);
-    } catch (e) { alert(`刷新失败：${e.message}`); }
+      if (post) await showTrackedHistory(post);
+    } catch (e) {
+      alert(`刷新失败：${e.message}`);
+    }
   }
 
   async function refreshAllTracked() {
+    const msg = document.getElementById('intelTrackedMsg');
+    if (msg) {
+      msg.style.color = 'var(--muted)';
+      msg.textContent = '正在全部刷新…';
+    }
     try {
       await api('/tracked/refresh-all', { method: 'POST' });
       await loadTracked();
-    } catch (e) { alert(`刷新失败：${e.message}`); }
+      if (msg) {
+        msg.style.color = 'var(--ok)';
+        msg.textContent = '全部刷新完成';
+      }
+    } catch (e) {
+      if (msg) {
+        msg.style.color = 'var(--err)';
+        msg.textContent = `刷新失败：${e.message}`;
+      }
+      alert(`刷新失败：${e.message}`);
+    }
   }
 
   async function deleteTracked(postId) {
-    if (!confirm('确定删除？')) return;
+    if (!confirm('确定删除该追踪？')) return;
     try {
       await api(`/tracked/${postId}`, { method: 'DELETE' });
       if (selectedTrackedId === postId) {
         selectedTrackedId = null;
-        if (trackedChart) { trackedChart.destroy(); trackedChart = null; }
+        hideTrackedDetail();
       }
       await loadTracked();
-    } catch (e) { alert(`删除失败：${e.message}`); }
+    } catch (e) {
+      alert(`删除失败：${e.message}`);
+    }
   }
 
   function init() {
     if (inited && document.getElementById('intelTabTopics')) {
       if (currentIntelTab === 'topics') loadTopics();
       if (currentIntelTab === 'mining') { loadCorpusAnalysis(); loadMiningInsights(); loadBenchmark(); }
-      if (currentIntelTab === 'tracked') { loadTrackedCorpusSummary(); loadTracked(); }
-      refreshLoginStatus();
+      if (currentIntelTab === 'assets') { loadTracked(); loadAssets(); }
       return;
     }
     inited = true;

@@ -310,15 +310,11 @@ def search_corpus(
     return {"query": q, "items": items, "total": len(items), "sync": sync}
 
 
-def list_corpus_assets(
+def _corpus_asset_clauses(
     *,
     q: str = "",
     topic_id: str | None = None,
-    limit: int = 40,
-    offset: int = 0,
-    group_by: str = "date",
-) -> dict[str, Any]:
-    sync = sync_corpus_from_stores()
+) -> tuple[str, list[Any], str]:
     clauses: list[str] = ["(status='' OR status='成功')"]
     params: list[Any] = []
     query = re.sub(r"\s+", " ", q or "").strip()
@@ -332,19 +328,49 @@ def list_corpus_assets(
         clauses.append("watch_topic_id=?")
         params.append(topic_id)
     where = f"WHERE {' AND '.join(clauses)}"
+    return where, params, query
+
+
+def _row_to_asset(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "platform": row["platform"],
+        "url": row["url"],
+        "title": row["title"] or "(无标题)",
+        "author": row["author"] or "",
+        "note_type": row["note_type"] or "",
+        "desc_preview": row["desc_preview"] or "",
+        "ocr_preview": row["ocr_preview"] or "",
+        "script_preview": row["script_preview"] or "",
+        "has_ocr": int(row["ocr_len"] or 0) > 0,
+        "has_script": int(row["script_len"] or 0) > 0,
+        "liked_count": row["liked_count"] or 0,
+        "watch_topic_id": row["watch_topic_id"] or "",
+        "synced_date": row["synced_date"] or "",
+    }
+
+
+def _topic_name_map() -> dict[str, str]:
+    rows = get_conn().execute("SELECT id, name FROM watch_topics").fetchall()
+    return {str(row["id"]): str(row["name"] or "") for row in rows}
+
+
+def list_corpus_assets(
+    *,
+    q: str = "",
+    topic_id: str | None = None,
+    limit: int = 40,
+    offset: int = 0,
+    group_by: str = "topic_date",
+) -> dict[str, Any]:
+    sync = sync_corpus_from_stores()
+    where, params, query = _corpus_asset_clauses(q=q, topic_id=topic_id)
     total = int(
         get_conn().execute(f"SELECT COUNT(*) AS c FROM corpus_items {where}", params).fetchone()["c"]
     )
-    params.extend([max(1, min(100, limit)), max(0, offset)])
-    group_key = group_by if group_by in ("date", "topic", "type") else "date"
-    order_sql = {
-        # Keep group members contiguous so pagination doesn't split groups apart.
-        "date": "ORDER BY substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
-        "topic": "ORDER BY watch_topic_id, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
-        "type": "ORDER BY note_type, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
-    }[group_key]
-    rows = get_conn().execute(
-        f"""SELECT id, platform, url, title, author, note_type,
+    group_key = group_by if group_by in ("date", "topic", "type", "topic_date") else "topic_date"
+    topic_names = _topic_name_map()
+    select_sql = """SELECT id, platform, url, title, author, note_type,
                    substr(desc_text,1,200) AS desc_preview,
                    substr(image_ocr_text,1,120) AS ocr_preview,
                    substr(video_script,1,120) AS script_preview,
@@ -352,51 +378,298 @@ def list_corpus_assets(
                    length(video_script) AS script_len,
                    liked_count, watch_topic_id,
                    substr(synced_at,1,10) AS synced_date
-            FROM corpus_items {where}
-            {order_sql}
-            LIMIT ? OFFSET ?""",
-        params,
-    ).fetchall()
-    items = []
-    for row in rows:
-        items.append(
-            {
-                "id": row["id"],
-                "platform": row["platform"],
-                "url": row["url"],
-                "title": row["title"] or "(无标题)",
-                "author": row["author"] or "",
-                "note_type": row["note_type"] or "",
-                "desc_preview": row["desc_preview"] or "",
-                "ocr_preview": row["ocr_preview"] or "",
-                "script_preview": row["script_preview"] or "",
-                "has_ocr": int(row["ocr_len"] or 0) > 0,
-                "has_script": int(row["script_len"] or 0) > 0,
-                "liked_count": row["liked_count"] or 0,
-                "watch_topic_id": row["watch_topic_id"] or "",
-                "synced_date": row["synced_date"] or "",
-            }
-        )
+            FROM corpus_items"""
+
     summary_row = get_conn().execute(
         """SELECT COUNT(*) AS total,
                   SUM(CASE WHEN length(image_ocr_text)>0 THEN 1 ELSE 0 END) AS with_ocr,
                   SUM(CASE WHEN length(video_script)>0 THEN 1 ELSE 0 END) AS with_script
            FROM corpus_items WHERE status='' OR status='成功'"""
     ).fetchone()
+    summary = {
+        "total": int(summary_row["total"] or 0),
+        "with_ocr": int(summary_row["with_ocr"] or 0),
+        "with_script": int(summary_row["with_script"] or 0),
+    }
+
+    # Nested topic → date folds: return the full matched set so folds stay intact.
+    if group_key == "topic_date":
+        rows = get_conn().execute(
+            f"""{select_sql} {where}
+                ORDER BY watch_topic_id, substr(synced_at,1,10) DESC, liked_count DESC, id DESC
+                LIMIT ?""",
+            [*params, max(1, min(500, max(limit, total or 1)))],
+        ).fetchall()
+        items = [_row_to_asset(row) for row in rows]
+        for item in items:
+            item["topic_name"] = topic_names.get(item["watch_topic_id"], "") or (
+                "未关联选题" if not item["watch_topic_id"] else "其他选题"
+            )
+        nested: dict[str, dict[str, Any]] = {}
+        for item in items:
+            tid = item["watch_topic_id"] or ""
+            if tid not in nested:
+                nested[tid] = {
+                    "topic_id": tid,
+                    "topic_name": item["topic_name"],
+                    "count": 0,
+                    "dates": {},
+                }
+            date_key = item["synced_date"] or "未知日期"
+            date_bucket = nested[tid]["dates"].setdefault(
+                date_key, {"date": date_key, "count": 0, "items": []}
+            )
+            date_bucket["items"].append(item)
+            date_bucket["count"] += 1
+            nested[tid]["count"] += 1
+        groups = []
+        for topic_group in nested.values():
+            dates = sorted(
+                topic_group["dates"].values(),
+                key=lambda d: d["date"] or "",
+                reverse=True,
+            )
+            groups.append(
+                {
+                    "topic_id": topic_group["topic_id"],
+                    "topic_name": topic_group["topic_name"],
+                    "count": topic_group["count"],
+                    "dates": dates,
+                }
+            )
+        groups.sort(key=lambda g: (-g["count"], g["topic_name"] or ""))
+        return {
+            "query": query,
+            "items": items,
+            "groups": groups,
+            "total": total,
+            "offset": 0,
+            "limit": len(items),
+            "group_by": group_key,
+            "sync": sync,
+            "summary": summary,
+            "topics": [{"id": k, "name": v} for k, v in topic_names.items()],
+        }
+
+    order_sql = {
+        "date": "ORDER BY substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+        "topic": "ORDER BY watch_topic_id, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+        "type": "ORDER BY note_type, substr(synced_at,1,10) DESC, liked_count DESC, id DESC",
+    }[group_key]
+    page_params = [*params, max(1, min(100, limit)), max(0, offset)]
+    rows = get_conn().execute(
+        f"{select_sql} {where} {order_sql} LIMIT ? OFFSET ?",
+        page_params,
+    ).fetchall()
+    items = [_row_to_asset(row) for row in rows]
+    for item in items:
+        item["topic_name"] = topic_names.get(item["watch_topic_id"], "") or (
+            "未关联选题" if not item["watch_topic_id"] else "其他选题"
+        )
     return {
         "query": query,
         "items": items,
+        "groups": [],
         "total": total,
         "offset": offset,
         "limit": limit,
         "group_by": group_key,
         "sync": sync,
-        "summary": {
-            "total": int(summary_row["total"] or 0),
-            "with_ocr": int(summary_row["with_ocr"] or 0),
-            "with_script": int(summary_row["with_script"] or 0),
-        },
+        "summary": summary,
+        "topics": [{"id": k, "name": v} for k, v in topic_names.items()],
     }
+
+
+def get_corpus_asset(asset_id: int) -> dict[str, Any] | None:
+    row = get_conn().execute(
+        """SELECT id, platform, url, title, author, note_type,
+                  substr(desc_text,1,200) AS desc_preview,
+                  substr(image_ocr_text,1,120) AS ocr_preview,
+                  substr(video_script,1,120) AS script_preview,
+                  length(image_ocr_text) AS ocr_len,
+                  length(video_script) AS script_len,
+                  liked_count, watch_topic_id,
+                  substr(synced_at,1,10) AS synced_date
+           FROM corpus_items WHERE id=?""",
+        (asset_id,),
+    ).fetchone()
+    if not row:
+        return None
+    item = _row_to_asset(row)
+    names = _topic_name_map()
+    item["topic_name"] = names.get(item["watch_topic_id"], "") or (
+        "未关联选题" if not item["watch_topic_id"] else "其他选题"
+    )
+    return item
+
+
+def update_corpus_asset(
+    asset_id: int,
+    *,
+    title: str | None = None,
+    author: str | None = None,
+    watch_topic_id: str | None = None,
+) -> dict[str, Any]:
+    row = get_conn().execute("SELECT id FROM corpus_items WHERE id=?", (asset_id,)).fetchone()
+    if not row:
+        raise ValueError("语料不存在")
+    sets: list[str] = []
+    params: list[Any] = []
+    if title is not None:
+        clean = re.sub(r"\s+", " ", title).strip()
+        if not clean:
+            raise ValueError("标题不能为空")
+        sets.append("title=?")
+        params.append(clean[:200])
+    if author is not None:
+        sets.append("author=?")
+        params.append(re.sub(r"\s+", " ", author).strip()[:120])
+    if watch_topic_id is not None:
+        topic = str(watch_topic_id).strip()
+        if topic:
+            exists = get_conn().execute(
+                "SELECT id FROM watch_topics WHERE id=?", (topic,)
+            ).fetchone()
+            if not exists:
+                raise ValueError("所属选题不存在")
+        sets.append("watch_topic_id=?")
+        params.append(topic)
+    if not sets:
+        raise ValueError("没有可更新的字段")
+    params.append(asset_id)
+    conn = get_conn()
+    conn.execute(f"UPDATE corpus_items SET {', '.join(sets)} WHERE id=?", params)
+    conn.commit()
+    item = get_corpus_asset(asset_id)
+    if not item:
+        raise ValueError("语料不存在")
+    return item
+
+
+def delete_corpus_asset(asset_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM corpus_items WHERE id=?", (asset_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_corpus_assets(asset_ids: list[int]) -> dict[str, Any]:
+    ids = sorted({int(x) for x in asset_ids if int(x) > 0})
+    if not ids:
+        return {"ok": True, "deleted": 0}
+    conn = get_conn()
+    placeholders = ",".join("?" for _ in ids)
+    cur = conn.execute(f"DELETE FROM corpus_items WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    return {"ok": True, "deleted": int(cur.rowcount or 0)}
+
+
+def add_corpus_asset_from_url(
+    url: str,
+    *,
+    platform: str = "xhs",
+    watch_topic_id: str = "",
+) -> dict[str, Any]:
+    clean_url = re.sub(r"\s+", "", url or "").strip()
+    if not clean_url.startswith("http"):
+        raise ValueError("请填写有效链接")
+    platform = "channels" if platform == "channels" else "xhs"
+    topic = str(watch_topic_id or "").strip()
+    if topic:
+        exists = get_conn().execute("SELECT id FROM watch_topics WHERE id=?", (topic,)).fetchone()
+        if not exists:
+            raise ValueError("所属选题不存在")
+
+    if platform == "channels":
+        from channels.fetch import extract_one as channels_extract_one
+
+        result = channels_extract_one(clean_url, transcribe_video=False)
+        if getattr(result, "status", "") != "成功":
+            raise ValueError(getattr(result, "error", None) or "视频号提取失败")
+        payload = {
+            "platform": "channels",
+            "feed_id": getattr(result, "feed_id", "") or "",
+            "url": getattr(result, "url", "") or clean_url,
+            "title": getattr(result, "title", "") or "",
+            "author": getattr(result, "author", "") or "",
+            "note_type": "视频",
+            "desc": getattr(result, "desc", "") or "",
+            "image_ocr_text": "",
+            "video_script": getattr(result, "video_script", "") or "",
+            "status": "成功",
+            "liked_count": getattr(result, "liked_count", 0) or 0,
+        }
+    else:
+        from fetch_extractor import extract_one as xhs_extract_one
+
+        result = xhs_extract_one(clean_url, transcribe_video=False, ocr_images=False)
+        if result.status != "成功":
+            raise ValueError(result.error or "小红书提取失败")
+        payload = {
+            "platform": "xhs",
+            "feed_id": result.feed_id or "",
+            "url": result.url or clean_url,
+            "title": result.title or "",
+            "author": result.author or "",
+            "note_type": result.note_type or "",
+            "desc": result.desc or "",
+            "image_ocr_text": result.image_ocr_text or "",
+            "video_script": result.video_script or "",
+            "status": "成功",
+            "liked_count": result.liked_count or 0,
+        }
+
+    feed_id = str(payload.get("feed_id") or "")
+    dedupe_key = f"{platform}:{feed_id}" if feed_id else f"{platform}:url:{payload['url']}"
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO corpus_items(
+             platform, feed_id, url, dedupe_key, title, author, note_type,
+             desc_text, image_ocr_text, video_script, status, watch_topic_id,
+             liked_count, source_updated_at, synced_at
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))
+           ON CONFLICT(dedupe_key) DO UPDATE SET
+             title=excluded.title,
+             author=excluded.author,
+             note_type=excluded.note_type,
+             desc_text=excluded.desc_text,
+             image_ocr_text=CASE
+               WHEN length(excluded.image_ocr_text)>0 THEN excluded.image_ocr_text
+               ELSE corpus_items.image_ocr_text END,
+             video_script=CASE
+               WHEN length(excluded.video_script)>0 THEN excluded.video_script
+               ELSE corpus_items.video_script END,
+             status=excluded.status,
+             watch_topic_id=CASE
+               WHEN excluded.watch_topic_id!='' THEN excluded.watch_topic_id
+               ELSE corpus_items.watch_topic_id END,
+             liked_count=excluded.liked_count,
+             synced_at=excluded.synced_at""",
+        (
+            platform,
+            feed_id,
+            payload["url"],
+            dedupe_key,
+            payload["title"],
+            payload["author"],
+            payload["note_type"],
+            payload["desc"],
+            payload["image_ocr_text"],
+            payload["video_script"],
+            "成功",
+            topic,
+            _safe_int_count(payload.get("liked_count")),
+            "",
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM corpus_items WHERE dedupe_key=?", (dedupe_key,)
+    ).fetchone()
+    item = get_corpus_asset(int(row["id"])) if row else None
+    if not item:
+        raise RuntimeError("入库后未能读取语料")
+    return item
 
 
 def _extract_brief_entities(brief: str) -> dict[str, Any]:

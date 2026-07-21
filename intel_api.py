@@ -14,13 +14,17 @@ from pydantic import BaseModel, Field
 import intel_product
 import intel_service
 from intel_corpus import (
+    add_corpus_asset_from_url,
     analyze_corpus,
+    delete_corpus_asset,
+    delete_corpus_assets,
     delete_saved_topic,
     list_corpus_assets,
     list_saved_topics,
     save_creative_topic,
     search_corpus,
     sync_corpus_from_stores,
+    update_corpus_asset,
 )
 from intel_scheduler import start_scheduler
 
@@ -352,15 +356,74 @@ def api_corpus_assets(
     topic_id: str | None = None,
     limit: int = 40,
     offset: int = 0,
-    group_by: str = "date",
+    group_by: str = "topic_date",
 ) -> dict[str, Any]:
     return list_corpus_assets(
         q=q,
         topic_id=topic_id,
-        limit=max(1, min(100, limit)),
+        limit=max(1, min(500, limit)),
         offset=max(0, offset),
         group_by=group_by,
     )
+
+
+class CorpusAssetCreate(BaseModel):
+    url: str
+    platform: str = "xhs"
+    watch_topic_id: str = ""
+
+
+class CorpusAssetUpdate(BaseModel):
+    title: str | None = None
+    author: str | None = None
+    watch_topic_id: str | None = None
+
+
+@router.post("/corpus/assets", dependencies=[Depends(verify_intel_service_token)])
+def api_create_corpus_asset(body: CorpusAssetCreate) -> dict[str, Any]:
+    try:
+        return {
+            "item": add_corpus_asset_from_url(
+                body.url,
+                platform=body.platform,
+                watch_topic_id=body.watch_topic_id,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"入库失败：{exc}") from exc
+
+
+@router.patch("/corpus/assets/{asset_id}", dependencies=[Depends(verify_intel_service_token)])
+def api_update_corpus_asset(asset_id: int, body: CorpusAssetUpdate) -> dict[str, Any]:
+    try:
+        return {
+            "item": update_corpus_asset(
+                asset_id,
+                title=body.title,
+                author=body.author,
+                watch_topic_id=body.watch_topic_id,
+            )
+        }
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.delete("/corpus/assets/{asset_id}", dependencies=[Depends(verify_intel_service_token)])
+def api_delete_corpus_asset(asset_id: int) -> dict[str, bool]:
+    if not delete_corpus_asset(asset_id):
+        raise HTTPException(404, "语料不存在")
+    return {"ok": True}
+
+
+class CorpusAssetBulkDelete(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+@router.post("/corpus/assets/bulk-delete", dependencies=[Depends(verify_intel_service_token)])
+def api_bulk_delete_corpus_assets(body: CorpusAssetBulkDelete) -> dict[str, Any]:
+    return delete_corpus_assets(body.ids)
 
 
 @router.get("/corpus/topics", dependencies=[Depends(verify_intel_service_token)])

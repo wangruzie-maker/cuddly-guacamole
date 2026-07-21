@@ -89,7 +89,11 @@ def _cdp_http_json(url: str, *, method: str = "GET") -> Any:
 
 
 def _dedicated_tab_ws_url(host: str, port: int) -> str:
-    """Get (or create once) a dedicated automation tab; never touch the user's tab."""
+    """Get (or create once) a dedicated automation tab; never touch the user's tab.
+
+    新建标签页用 about:blank，不要直接打开 /explore——否则未登录时会立刻弹出
+    「登录后推荐更懂你的笔记」，并在后续每次探测导航时被反复刷新。
+    """
     key = f"{host}:{port}"
     base = f"http://{host}:{port}"
     try:
@@ -107,10 +111,7 @@ def _dedicated_tab_ws_url(host: str, port: int) -> str:
     ws_url = (entry or {}).get("webSocketDebuggerUrl") or ""
     if not ws_url:
         try:
-            created = _cdp_http_json(
-                f"{base}/json/new?https://www.xiaohongshu.com/explore",
-                method="PUT",
-            )
+            created = _cdp_http_json(f"{base}/json/new?about:blank", method="PUT")
         except Exception as exc:  # noqa: BLE001
             raise DiscoverCdpError(f"无法创建自动化专用标签页: {exc}") from exc
         _dedicated_tab_ids[key] = str(created.get("id") or "")
@@ -173,7 +174,12 @@ def _quick_logged_in_signal(publisher: Any, *, allow_navigate: bool = False) -> 
         if not (isinstance(url, str) and "xiaohongshu.com" in url):
             if not allow_navigate:
                 return None
-            publisher._navigate("https://www.xiaohongshu.com/explore")
+            # 主站首页：与关键词搜索同一套会话（不要进创作者后台）
+            publisher._navigate("https://www.xiaohongshu.com/")
+            try:
+                publisher._sleep(1.0, minimum_seconds=0.4)
+            except TypeError:
+                time.sleep(1.0)
         result = publisher._evaluate(
             """
             (() => {
@@ -199,26 +205,34 @@ def _quick_logged_in_signal(publisher: Any, *, allow_navigate: bool = False) -> 
 
 
 def _ensure_session_logged_in(publisher: Any) -> None:
-    """Verify login before discover; ignore stale positive cache."""
+    """Verify login before discover — never call check_home_login().
+
+    check_home_login() 会反复 Page.navigate 到首页，未登录时登录弹窗每几秒被刷掉，
+    用户无法扫码。这里只读 __INITIAL_STATE__，必要时最多静默导航一次到主站首页
+    （与关键词搜索同源会话）。
+    """
     memo_kw = {
         "account": getattr(publisher, "account_name", None),
         "port": getattr(publisher, "port", None),
     }
-    if _quick_logged_in_signal(publisher, allow_navigate=True) is True:
+    signal = _quick_logged_in_signal(publisher, allow_navigate=False)
+    if signal is True:
         _remember_login_status(True, **memo_kw)
         return
+    if signal is False:
+        _remember_login_status(False, **memo_kw)
+        raise DiscoverLoginRequired(
+            "小红书未登录。请先在 Chrome 窗口完成登录（扫码/手机号），再运行采集。"
+        )
 
-    def _modal_probe() -> bool:
-        if hasattr(publisher, "_clear_login_cache"):
-            publisher._clear_login_cache(scope="home")
-        return bool(publisher.check_home_login())
-
-    # 弹窗关键词检测偶发误报（渲染时机），失败后短暂等待重试一次再下结论。
-    if _modal_probe():
-        _remember_login_status(True, **memo_kw)
-        return
-    time.sleep(2)
-    if _quick_logged_in_signal(publisher, allow_navigate=True) is True or _modal_probe():
+    # 当前页读不到状态时，只跳一次主站首页做只读探测（与搜索同源会话）。
+    try:
+        publisher._navigate("https://www.xiaohongshu.com/")
+        publisher._sleep(1.2, minimum_seconds=0.5)
+    except Exception:  # noqa: BLE001
+        pass
+    signal = _quick_logged_in_signal(publisher, allow_navigate=False)
+    if signal is True:
         _remember_login_status(True, **memo_kw)
         return
     _remember_login_status(False, **memo_kw)
@@ -398,35 +412,57 @@ def list_account_notes(
             pass
 
 
+_login_flow_started_at: dict[int, float] = {}
+_LOGIN_FLOW_COOLDOWN = 90.0
+
+
 def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
-    """Start redbook-skills login flow in background."""
-    # 用户主动去登录了，丢弃缓存的旧状态，登录完成后立刻能读到新状态。
-    _forget_login_status(None, port)
-    if not SCRIPTS_DIR.is_dir():
-        raise DiscoverCdpError(
-            f"未找到 redbook-skills（{SKILL_ROOT}）。请设置 REDBOOK_SKILLS_ROOT 或安装 skill。"
-        )
+    """Open Xiaohongshu homepage once for login (search uses the same site session).
+
+    检索映射的是小红书主站搜索页，因此登录也打开主站首页，而不是创作者后台。
+    冷却期内重复点击不会再次导航，避免扫码过程中页面被刷新。
+    """
     login_port = int(port or DEFAULT_CDP_PORT)
-    cmd = [
-        sys.executable,
-        str(SCRIPTS_DIR / "cdp_publish.py"),
-        "--port",
-        str(login_port),
-        "login",
-    ]
-    proc = subprocess.Popen(  # noqa: S603
-        cmd,
-        cwd=str(SCRIPTS_DIR),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return {
-        "started": True,
-        "pid": proc.pid,
-        "port": login_port,
-        "message": "已触发小红书登录流程，请在弹出的 Chrome 窗口内完成登录。",
-    }
+    now = time.time()
+    last = _login_flow_started_at.get(login_port, 0.0)
+    if now - last < _LOGIN_FLOW_COOLDOWN:
+        remain = int(_LOGIN_FLOW_COOLDOWN - (now - last))
+        return {
+            "started": False,
+            "cooldown": True,
+            "port": login_port,
+            "message": f"小红书主页已打开，请在 Chrome 窗口完成登录（{remain}s 内不会重复刷新）。",
+        }
+
+    _forget_login_status(None, login_port)
+    publisher = None
+    try:
+        from chrome_launcher import ensure_chrome
+
+        if not ensure_chrome(port=login_port, headless=False, account=None):
+            raise DiscoverCdpError(f"无法启动 Chrome CDP（port={login_port}）。")
+        publisher = _get_publisher(port=login_port, headless=False)
+        # 主站首页：与关键词搜索同一套会话/Cookie
+        publisher._navigate("https://www.xiaohongshu.com/")
+        try:
+            publisher._sleep(1.5, minimum_seconds=0.6)
+        except TypeError:
+            time.sleep(1.5)
+        _login_flow_started_at[login_port] = now
+        return {
+            "started": True,
+            "cooldown": False,
+            "port": login_port,
+            "message": "已打开小红书主页，请在该窗口完成扫码/手机号登录；完成后点「刷新状态」，再点「运行一次」。",
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise DiscoverCdpError(f"打开登录页失败：{exc}") from exc
+    finally:
+        if publisher is not None:
+            try:
+                publisher.disconnect()
+            except Exception:
+                pass
 
 
 def _cdp_reachable(*, port: int, host: str) -> bool:
@@ -448,9 +484,9 @@ def login_status(
 ) -> dict[str, Any]:
     """Check whether current CDP session is logged in.
 
-    force=False（UI 轮询）走被动路径：命中进程内缓存直接返回；
-    未命中也只读取当前页面状态，绝不导航，避免用户浏览中的标签页被跳走。
-    force=True（点「刷新状态」/ 采集运行开头）才允许导航做完整校验。
+    默认与 force=True 都禁止调用 check_home_login()（会反复刷新 explore 登录弹层）。
+    force=False：只读缓存 / 当前页，绝不导航。
+    force=True：最多做一次不进 explore 的只读校验（见 _ensure_session_logged_in）。
     """
     login_port = int(port or DEFAULT_CDP_PORT)
     login_host = DEFAULT_CDP_HOST
@@ -468,21 +504,19 @@ def login_status(
             "logged_in": None,
             "reason": "cdp_unavailable",
             "session_reusable": False,
-            "message": "Chrome 调试未连接。请先点击「登录小红书」完成扫码。",
+            "message": "Chrome 调试未连接。请先打开登录窗口完成扫码。",
         }
     publisher = None
     try:
         publisher = _get_publisher(account=account, port=login_port, host=login_host, headless=False)
         if not force:
-            # 被动探测：只读当前页面，不导航。读不出来就返回未知，
-            # 状态交给「刷新状态」按钮或采集运行时的一次性完整校验。
             signal = _quick_logged_in_signal(publisher, allow_navigate=False)
             if signal is None:
                 return {
                     "logged_in": None,
                     "reason": "passive_unknown",
                     "session_reusable": True,
-                    "message": "未主动探测（避免打断浏览器）。点「刷新状态」或运行采集时会完整校验。",
+                    "message": "未主动探测（避免打断登录页）。运行采集时会校验。",
                 }
             _remember_login_status(signal, account=account, port=login_port)
             return {
@@ -490,6 +524,24 @@ def login_status(
                 "reason": "connected" if signal else "not_logged_in",
                 "session_reusable": signal,
                 "message": "小红书登录状态正常" if signal else "小红书未登录，请在 Chrome 窗口完成登录后再采集。",
+            }
+        # 登录冷却期内禁止再导航，避免「刷新状态」把主页登录弹层刷掉
+        in_login_cooldown = (time.time() - _login_flow_started_at.get(login_port, 0.0)) < _LOGIN_FLOW_COOLDOWN
+        if in_login_cooldown:
+            signal = _quick_logged_in_signal(publisher, allow_navigate=False)
+            if signal is True:
+                _remember_login_status(True, account=account, port=login_port)
+                return {
+                    "logged_in": True,
+                    "reason": "connected",
+                    "session_reusable": True,
+                    "message": "小红书登录状态正常",
+                }
+            return {
+                "logged_in": False if signal is False else None,
+                "reason": "login_cooldown" if signal is None else "not_logged_in",
+                "session_reusable": False,
+                "message": "登录页已打开，请先完成扫码（冷却期内不会刷新页面）。",
             }
         try:
             _ensure_session_logged_in(publisher)

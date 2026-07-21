@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 PORT=8765
-EXPECTED_VERSION="1.31.0"
+EXPECTED_VERSION="1.36.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"

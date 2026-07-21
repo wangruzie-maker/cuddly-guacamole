@@ -484,18 +484,32 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
     # 避免"已登录却反复弹未登录"的误报。
     xhs_login_verified = False
     xhs_login_blocked = ""
+    login_required = False
     if "xhs" in platforms:
         try:
             from xhs.cdp_bridge import login_status as _xhs_login_status
 
-            status = _xhs_login_status(account=account or None, force=True)
+            # 先被动探测；仅在「未知」时做一次不进 explore 的轻量校验。
+            status = _xhs_login_status(account=account or None, force=False)
             if status.get("logged_in") is True:
                 xhs_login_verified = True
-            elif status.get("logged_in") is False:
-                xhs_login_blocked = str(status.get("message") or "小红书未登录，请先完成登录再采集。")
-        except Exception:  # noqa: BLE001
-            # 状态探测失败时不拦截，交给采集轮次自行验证。
-            pass
+            elif status.get("logged_in") is False or status.get("reason") == "cdp_unavailable":
+                login_required = True
+                xhs_login_blocked = str(
+                    status.get("message") or "小红书未登录，请先完成登录后再运行。"
+                )
+            else:
+                status = _xhs_login_status(account=account or None, force=True)
+                if status.get("logged_in") is True:
+                    xhs_login_verified = True
+                else:
+                    login_required = True
+                    xhs_login_blocked = str(
+                        status.get("message") or "小红书未登录，请先完成登录后再运行。"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            login_required = True
+            xhs_login_blocked = f"小红书登录状态检测失败：{exc}"
 
     for platform in platforms:
         source_id = "xhs_search_keyword" if platform == "xhs" else "channels_search_keyword"
@@ -695,6 +709,7 @@ def run_watch_topic(topic_id: str) -> dict[str, Any]:
         "errors": errors[:10],
         "notes": notes[:10],
         "message": message,
+        "login_required": bool(login_required),
     }
 
 
@@ -1135,6 +1150,8 @@ def _refresh_tracked_row(post: dict[str, Any]) -> dict[str, Any]:
             from fetch_extractor import extract_one as xhs_extract_one
 
             result = xhs_extract_one(url, transcribe_video=False, ocr_images=False, cache_images=False)
+            if getattr(result, "status", "") != "成功":
+                raise RuntimeError(getattr(result, "error", None) or "抓取失败")
             liked = parse_count(result.liked_count)
             collected = parse_count(result.collected_count)
             comment = parse_count(result.comment_count)
