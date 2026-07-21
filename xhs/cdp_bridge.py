@@ -447,9 +447,8 @@ def _diagnose_chrome_launch(port: int) -> str:
                     hints.append(f"启动日志：{tail[-300:]}")
             except OSError:
                 pass
-        hints.append("可先菜单栏「Chrome → 完全退出」全部退出日常 Chrome，再点「登录小红书」。")
-        hints.append("macOS 上日常 Chrome 开着时，调试参数常被吞掉导致 9222 起不来。")
-        hints.append("可先完全退出 Chrome 后重试；或终端运行：")
+        hints.append("macOS：日常 Chrome 开着时调试端口常起不来，请先菜单栏「Chrome → 完全退出」再点「登录小红书」。")
+        hints.append("或终端手动启动：")
         hints.append(f'  open -n -a "Google Chrome" --args --remote-debugging-port={port} --user-data-dir="{profile}" --remote-allow-origins=*')
     except Exception as exc:  # noqa: BLE001
         hints.append(f"诊断失败：{exc}")
