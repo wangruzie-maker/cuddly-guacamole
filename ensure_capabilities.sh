@@ -137,6 +137,22 @@ raise SystemExit(0 if ok else 1)
 PY
 }
 
+chrome_ready() {
+  "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import os, sys
+from pathlib import Path
+root = Path("vendor/redbook-skills/scripts")
+if root.is_dir() and str(root) not in sys.path:
+    sys.path.insert(0, str(root))
+try:
+    from chrome_launcher import get_chrome_path
+    p = get_chrome_path()
+    raise SystemExit(0 if p and os.path.isfile(p) else 1)
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 scan_capabilities() {
   MISSING=()
   OPTIONAL_MISSING=()
@@ -149,6 +165,12 @@ scan_capabilities() {
     STATUS_LINES[${#STATUS_LINES[@]}]="  [i] Using project .venv"
   else
     STATUS_LINES[${#STATUS_LINES[@]}]="  [i] .venv not created yet (will create on install)"
+  fi
+
+  if chrome_ready; then
+    mark "Google Chrome（小红书 CDP 登录）" ok
+  else
+    mark "Google Chrome（小红书 CDP 登录）" missing "请安装 https://www.google.com/chrome/ （Safari 不可用）"
   fi
 
   if redbook_ready; then

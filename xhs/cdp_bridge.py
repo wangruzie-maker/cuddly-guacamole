@@ -418,6 +418,42 @@ _login_flow_started_at: dict[int, float] = {}
 _LOGIN_FLOW_COOLDOWN = 90.0
 
 
+def _diagnose_chrome_launch(port: int) -> str:
+    """Human-readable hints when CDP Chrome fails to start."""
+    hints: list[str] = []
+    try:
+        from chrome_launcher import get_chrome_path, get_user_data_dir, is_port_open
+
+        try:
+            chrome_path = get_chrome_path()
+            hints.append(f"已找到浏览器：{chrome_path}")
+        except FileNotFoundError as exc:
+            hints.append(str(exc))
+            hints.append("同事机请先安装 Google Chrome（不要用仅系统自带的 Safari）。")
+            return "；".join(hints)
+
+        profile = get_user_data_dir(None)
+        hints.append(f"专用配置目录：{profile}")
+        if is_port_open(port):
+            hints.append(f"端口 {port} 已被占用（可能不是本工具的 Chrome）")
+        else:
+            hints.append(f"端口 {port} 未监听")
+        log_path = os.path.join(profile, "cdp_launch.log")
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, "rb") as fh:
+                    tail = fh.read()[-800:].decode("utf-8", errors="replace").strip()
+                if tail:
+                    hints.append(f"启动日志：{tail[-300:]}")
+            except OSError:
+                pass
+        hints.append("可先完全退出 Chrome 后重试「登录小红书」；或终端运行：")
+        hints.append(f'  "{chrome_path}" --remote-debugging-port={port} --user-data-dir="{profile}"')
+    except Exception as exc:  # noqa: BLE001
+        hints.append(f"诊断失败：{exc}")
+    return " | ".join(hints)
+
+
 def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
     """Open Xiaohongshu homepage once for login (search uses the same site session).
 
@@ -442,7 +478,10 @@ def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
         from chrome_launcher import ensure_chrome
 
         if not ensure_chrome(port=login_port, headless=False, account=None):
-            raise DiscoverCdpError(f"无法启动 Chrome CDP（port={login_port}）。")
+            detail = _diagnose_chrome_launch(login_port)
+            raise DiscoverCdpError(
+                f"无法启动 Chrome CDP（port={login_port}）。{detail}"
+            )
         publisher = _get_publisher(port=login_port, headless=False)
         # 主站首页：与关键词搜索同一套会话/Cookie
         publisher._navigate("https://www.xiaohongshu.com/")
@@ -457,8 +496,11 @@ def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
             "port": login_port,
             "message": "已打开小红书主页，请在该窗口完成扫码/手机号登录；完成后点「刷新状态」，再点「运行一次」。",
         }
+    except DiscoverCdpError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise DiscoverCdpError(f"打开登录页失败：{exc}") from exc
+        detail = _diagnose_chrome_launch(login_port)
+        raise DiscoverCdpError(f"打开登录页失败：{exc}。{detail}") from exc
     finally:
         if publisher is not None:
             try:

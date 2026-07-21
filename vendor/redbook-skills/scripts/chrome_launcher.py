@@ -19,7 +19,7 @@ from typing import Optional
 
 CDP_PORT = 9222
 PROFILE_DIR_NAME = "XiaohongshuProfile"
-STARTUP_TIMEOUT = 15  # seconds to wait for Chrome to start
+STARTUP_TIMEOUT = 30  # seconds to wait for Chrome to start
 
 # Track the Chrome process we launched so we can kill it later
 _chrome_process: subprocess.Popen | None = None
@@ -29,6 +29,10 @@ _current_account: Optional[str] = None
 
 def get_chrome_path() -> str:
     """Find Chrome executable on Windows/macOS/Linux."""
+    env_path = (os.environ.get("CHROME_PATH") or os.environ.get("GOOGLE_CHROME_BIN") or "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
     candidates = []
 
     if sys.platform == "win32":
@@ -38,11 +42,17 @@ def get_chrome_path() -> str:
                 candidates.append(
                     os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")
                 )
+                candidates.append(
+                    os.path.join(base, "Chromium", "Application", "chrome.exe")
+                )
     elif sys.platform == "darwin":
         candidates.extend(
             [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
             ]
         )
     else:
@@ -72,7 +82,8 @@ def get_chrome_path() -> str:
         return found
 
     raise FileNotFoundError(
-        "Chrome not found. Please install Google Chrome or set its path manually."
+        "未找到 Google Chrome。请先安装：https://www.google.com/chrome/ "
+        "或设置环境变量 CHROME_PATH 指向浏览器可执行文件。"
     )
 
 
@@ -137,6 +148,8 @@ def launch_chrome(
     cmd = [
         chrome_path,
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-allow-origins=*",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
@@ -144,6 +157,7 @@ def launch_chrome(
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
         "--disable-background-media-suspend",
+        "--disable-features=Translate,MediaRouter",
     ]
 
     if headless:
@@ -156,11 +170,19 @@ def launch_chrome(
     print(f"  profile dir: {user_data_dir}")
     print(f"  debug port : {port}")
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    os.makedirs(user_data_dir, exist_ok=True)
+    log_path = os.path.join(user_data_dir, "cdp_launch.log")
+    log_fp = open(log_path, "ab", buffering=0)
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fp,
+            stderr=log_fp,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        log_fp.close()
+        raise RuntimeError(f"无法执行 Chrome：{exc}") from exc
     _chrome_process = proc
 
     # Wait for the debug port to become available
@@ -168,12 +190,31 @@ def launch_chrome(
     while time.time() < deadline:
         if is_port_open(port):
             print(f"[chrome_launcher] Chrome is ready on port {port}.")
+            try:
+                log_fp.close()
+            except Exception:
+                pass
             return proc
+        # Chrome crashed immediately
+        if proc.poll() is not None:
+            break
         time.sleep(0.5)
 
+    exit_code = proc.poll()
+    hint = ""
+    try:
+        log_fp.flush()
+        log_fp.close()
+        with open(log_path, "rb") as fh:
+            tail = fh.read()[-2000:].decode("utf-8", errors="replace").strip()
+        if tail:
+            hint = f" Chrome 日志尾部：{tail[-500:]}"
+    except Exception:
+        pass
+
     print(
-        f"[chrome_launcher] WARNING: Chrome started but port {port} not responding "
-        f"after {STARTUP_TIMEOUT}s. It may still be initializing.",
+        f"[chrome_launcher] WARNING: Chrome port {port} not ready "
+        f"after {STARTUP_TIMEOUT}s (exit={exit_code}).{hint}",
         file=sys.stderr,
     )
     return proc
@@ -302,8 +343,18 @@ def ensure_chrome(
         return True
     try:
         launch_chrome(port, headless=headless, account=account)
+        if is_port_open(port):
+            return True
+        # One retry after cleaning a stuck instance on this port
+        print(f"[chrome_launcher] Port {port} still closed; retrying after restart…")
+        kill_chrome(port)
+        time.sleep(1.2)
+        launch_chrome(port, headless=headless, account=account)
         return is_port_open(port)
     except FileNotFoundError as e:
+        print(f"[chrome_launcher] Error: {e}", file=sys.stderr)
+        return False
+    except Exception as e:
         print(f"[chrome_launcher] Error: {e}", file=sys.stderr)
         return False
 
