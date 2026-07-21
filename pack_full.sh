@@ -28,6 +28,7 @@ rsync -a \
   --exclude '.git/' \
   --exclude 'output/' \
   --exclude 'dist/' \
+  --exclude '.venv/' \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude '.env' \
