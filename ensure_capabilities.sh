@@ -22,6 +22,16 @@ for arg in "$@"; do
 done
 
 resolve_python_bin
+# 通用同事机：没有任何可用 3.10+ 时，先引导装 Python，再继续检测
+if ! _pick_system_python >/dev/null 2>&1 && ! _venv_is_usable; then
+  echo ">>> 未检测到可用的 Python 3.10+（同事通用 Mac 常见只有系统 3.9）。"
+  if [[ "$MODE" == "manual" ]]; then
+    /bin/bash "$DIR/bootstrap_python.sh" || true
+    resolve_python_bin
+  else
+    echo "    请先双击「准备Python环境.command」，再打开本工具。"
+  fi
+fi
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
 

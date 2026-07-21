@@ -2,21 +2,19 @@
 
 本地运行的小红书 / 视频号工具，围绕「获取选题依据 → 选择性转录 → 语料分析 → 得出创作选题 → 发布追踪」组织操作。
 
-## 3 步上手
+## 3 步上手（通用 Mac）
+
+1. 没有 Python 3.12 → 双击 **`准备Python环境.command`**（官方安装包）  
+2. 双击 **`检测并安装能力.command`**，同意装依赖到项目 `.venv`  
+3. 双击 **`打开小红书提取工具.command`**
 
 ```bash
-cd xhs-note-extractor
-cp .env.example .env   # 可选：仅 AI 文案需要填 DEEPSEEK_API_KEY
-./ensure_capabilities.sh --manual   # 创建 .venv 并安装依赖（避开系统/uv 托管限制）
-./open_app.sh                       # 能力齐全时不会再弹安装提示
+./bootstrap_python.sh          # 可选：命令行准备 Python
+./ensure_capabilities.sh --manual
+./open_app.sh
 ```
 
-推荐 Python **3.10–3.12**。依赖一律进入项目 `.venv`，不会改系统/uv 的 Python。
-
-也可双击 **`检测并安装能力.command`**，再双击 **`打开小红书提取工具.command`**。  
-发给同事的完整包：`./pack_full.sh`（含 Whisper + redbook-skills）。
-
-浏览器打开 `http://127.0.0.1:8765` 后：
+也可 `./pack_full.sh` 打完整包发给同事（含 Whisper + redbook-skills）。
 
 1. **登录小红书** — 点击顶栏「登录小红书」，在 Chrome 扫码
 2. **获取依据** — 设置采集深度及互动阈值，按数据筛选参考内容

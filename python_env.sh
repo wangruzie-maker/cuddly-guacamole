@@ -184,10 +184,21 @@ $list
 EOF
 
   echo "    ❌ 无法创建可用的虚拟环境。"
-  echo "      请安装官方/Homebrew Python 3.12 后重试："
-  echo "        brew install python@3.12"
-  echo "      或从 https://www.python.org/downloads/ 安装 3.12，然后："
-  echo "        rm -rf .venv && ./ensure_capabilities.sh --manual"
+  echo ""
+  if [[ -f "$DIR/bootstrap_python.sh" ]]; then
+    echo "    将启动「准备 Python 环境」引导（适合同事通用 Mac）…"
+    if [[ -t 0 ]] || [[ -r /dev/tty ]]; then
+      /bin/bash "$DIR/bootstrap_python.sh" || true
+    else
+      echo "    请双击：准备Python环境.command"
+      echo "    或安装官方 Python 3.12：https://www.python.org/downloads/"
+    fi
+  else
+    echo "      请安装官方 Python 3.12 后重试："
+    echo "        https://www.python.org/downloads/"
+    echo "      或: brew install python@3.12"
+  fi
+  echo "      然后: rm -rf .venv && ./ensure_capabilities.sh --manual"
   return 1
 }
 
