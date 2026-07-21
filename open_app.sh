@@ -4,9 +4,11 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+# shellcheck source=python_env.sh
+source "$DIR/python_env.sh"
 
 PORT=8765
-EXPECTED_VERSION="1.39.0"
+EXPECTED_VERSION="1.40.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
@@ -14,26 +16,9 @@ LOG_FILE="$DIR/output/server.log"
 
 mkdir -p "$DIR/output"
 
-# Prefer Python ≥3.10 (dataclass slots used by redbook-skills feed_explorer).
-pick_python() {
-  local cand
-  for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
-    if command -v "$cand" >/dev/null 2>&1; then
-      if "$cand" - <<'PY' >/dev/null 2>&1
-from dataclasses import dataclass
-@dataclass(slots=True)
-class _T:
-    x: int = 0
-PY
-      then
-        command -v "$cand"
-        return 0
-      fi
-    fi
-  done
-  command -v python3
-}
-PYTHON_BIN="$(pick_python)"
+resolve_python_bin
+# 若尚无 .venv 但系统 Python 可用，先沿用；安装能力时会创建 .venv
+export PYTHON_BIN
 
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
 
@@ -54,13 +39,18 @@ routes_ok() {
 }
 
 ensure_deps() {
-  # 自动模式：能力齐全则静默；仅核心缺失时才询问安装
+  # 自动模式：能力齐全则静默；仅核心缺失时才询问安装（装进 .venv）
   if [[ -f "$DIR/ensure_capabilities.sh" ]]; then
-    PYTHON_BIN="$PYTHON_BIN" bash "$DIR/ensure_capabilities.sh" --auto || true
+    bash "$DIR/ensure_capabilities.sh" --auto || true
+  fi
+  resolve_python_bin
+  if [[ -x "$DIR/.venv/bin/python" ]]; then
+    PYTHON_BIN="$DIR/.venv/bin/python"
   fi
   if ! "$PYTHON_BIN" -c "import fastapi" 2>/dev/null; then
     echo "核心依赖仍缺失。请先双击「检测并安装能力.command」或运行:"
     echo "  ./ensure_capabilities.sh --manual"
+    echo "（将自动创建 .venv，规避 uv/系统 Python 的 externally-managed-environment）"
     exit 1
   fi
 }

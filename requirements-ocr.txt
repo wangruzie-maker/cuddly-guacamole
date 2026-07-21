@@ -1,0 +1,2 @@
+# 图片 OCR（需 Python 3.10–3.12；3.13+ 常无可用轮子）
+rapidocr-onnxruntime>=1.3.0,<1.5

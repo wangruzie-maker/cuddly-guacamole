@@ -3,8 +3,14 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+# shellcheck source=python_env.sh
+source "$DIR/python_env.sh"
+resolve_python_bin
+if [[ -x "$DIR/.venv/bin/python" ]]; then
+  PYTHON_BIN="$DIR/.venv/bin/python"
+fi
 
-python3 << 'PY'
+"$PYTHON_BIN" << 'PY'
 from whisper_config import DEFAULT_WHISPER_MODEL
 from video_script import _get_whisper_model
 

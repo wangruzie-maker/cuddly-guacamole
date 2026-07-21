@@ -6,6 +6,8 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
+# shellcheck source=python_env.sh
+source "$DIR/python_env.sh"
 
 MODE="auto"
 for arg in "$@"; do
@@ -19,25 +21,7 @@ for arg in "$@"; do
   esac
 done
 
-pick_python() {
-  local cand
-  for cand in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
-    if command -v "$cand" >/dev/null 2>&1; then
-      if "$cand" - <<'PY' >/dev/null 2>&1
-from dataclasses import dataclass
-@dataclass(slots=True)
-class _T:
-    x: int = 0
-PY
-      then
-        command -v "$cand"
-        return 0
-      fi
-    fi
-  done
-  command -v python3
-}
-PYTHON_BIN="${PYTHON_BIN:-$(pick_python)}"
+resolve_python_bin
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
 
@@ -51,7 +35,6 @@ check_import() {
 }
 
 mark() {
-  # mark "名称" ok|missing|optional_missing "说明"
   local name="$1" state="$2" note="${3:-}"
   if [[ "$state" == "ok" ]]; then
     STATUS_LINES+=("  ✅ $name${note:+ — $note}")
@@ -140,6 +123,15 @@ scan_capabilities() {
   OPTIONAL_MISSING=()
   STATUS_LINES=()
 
+  local py_ver
+  py_ver="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")' 2>/dev/null || echo "?")"
+  STATUS_LINES+=("  ℹ️  当前解释器: $PYTHON_BIN (Python $py_ver)")
+  if [[ -x "$DIR/.venv/bin/python" ]]; then
+    STATUS_LINES+=("  ℹ️  使用项目虚拟环境 .venv（不受系统/uv 托管限制）")
+  else
+    STATUS_LINES+=("  ℹ️  尚未创建 .venv；安装时会自动创建，避免 externally-managed-environment")
+  fi
+
   if redbook_ready; then
     mark "小红书采集（redbook-skills）" ok "vendor 或本机已就绪"
   else
@@ -179,7 +171,11 @@ scan_capabilities() {
   if check_import rapidocr_onnxruntime || check_import rapidocr; then
     mark "图片 OCR（rapidocr）" ok
   else
-    mark "图片 OCR（rapidocr）" missing
+    if _python_is_too_new_for_ocr "$PYTHON_BIN"; then
+      mark "图片 OCR（rapidocr）" optional_missing "当前 Python≥3.13 无适配轮子，建议改用 3.12 重建 .venv"
+    else
+      mark "图片 OCR（rapidocr）" missing "将装入 .venv"
+    fi
   fi
 
   if check_import playwright && playwright_ready; then
@@ -192,7 +188,6 @@ scan_capabilities() {
 print_report() {
   echo "========================================"
   echo " 能力检测报告"
-  echo " Python: $PYTHON_BIN"
   echo " 模式: $MODE"
   echo "========================================"
   local line
@@ -206,26 +201,48 @@ print_report() {
     echo "核心缺失：${#MISSING[@]} 项"
   fi
   if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
-    echo "可选未装：${#OPTIONAL_MISSING[@]} 项（不影响主流程）"
+    echo "可选/受限：${#OPTIONAL_MISSING[@]} 项（不一定阻断主流程）"
   fi
-  echo "说明：TokenHub API Key 不在此安装，AI 文案请在网页自行填写。"
+  echo "说明：依赖一律装进项目 .venv，不再写入系统/uv 托管的 Python。"
+  echo "      TokenHub API Key 请在网页自行填写。"
   echo "========================================"
 }
 
 do_install() {
   echo ""
-  echo ">>> 安装 Python 依赖…"
-  "$PYTHON_BIN" -m pip install -r requirements.txt || {
-    echo "    完整 requirements 安装失败，尝试核心依赖…"
-    "$PYTHON_BIN" -m pip install "fastapi>=0.110" "uvicorn[standard]>=0.27" requests pydantic \
-      "faster-whisper>=1.0" openpyxl Pillow zhconv jieba websockets || true
-    "$PYTHON_BIN" -m pip install "rapidocr-onnxruntime>=1.3.0" || \
-      echo "    ⚠ OCR 包在当前 Python 版本可能不可用，图片 OCR 将暂不可用。"
+  ensure_project_venv || {
+    echo "无法创建虚拟环境，安装中止。"
+    return 1
   }
+  export PYTHON_BIN
+  echo "    安装目标: $PYTHON_BIN"
+
+  echo ""
+  echo ">>> 安装核心 Python 依赖到 .venv…"
+  if ! "$PYTHON_BIN" -m pip install -r requirements.txt; then
+    echo "    完整 requirements 失败，尝试精简核心包…"
+    "$PYTHON_BIN" -m pip install "fastapi>=0.110" "uvicorn[standard]>=0.27" requests pydantic \
+      "faster-whisper>=1.0" openpyxl Pillow zhconv jieba websockets || {
+      echo "    ❌ 核心依赖安装失败。请检查网络，或改用 Python 3.12：brew install python@3.12"
+      return 1
+    }
+  fi
+
   if [[ -f "$DIR/vendor/redbook-skills/requirements.txt" ]]; then
     "$PYTHON_BIN" -m pip install -r "$DIR/vendor/redbook-skills/requirements.txt" -q || true
-  else
-    "$PYTHON_BIN" -m pip install "requests>=2.28" "websockets>=12" -q || true
+  fi
+
+  echo ""
+  echo ">>> 安装图片 OCR（可选，需 Python 3.10–3.12）…"
+  if _python_is_too_new_for_ocr "$PYTHON_BIN"; then
+    echo "    跳过：当前为 Python ≥3.13，rapidocr-onnxruntime 无可用轮子。"
+    echo "    解决：安装 python@3.12 后执行 rm -rf .venv && ./ensure_capabilities.sh --manual"
+  elif [[ -f "$DIR/requirements-ocr.txt" ]]; then
+    if "$PYTHON_BIN" -m pip install -r "$DIR/requirements-ocr.txt"; then
+      echo "    OCR 已安装。"
+    else
+      echo "    ⚠ OCR 安装失败，图片 OCR 暂不可用；其它功能不受影响。"
+    fi
   fi
 
   echo ""
@@ -239,21 +256,31 @@ do_install() {
       echo "    已使用压缩包内置模型：vendor/faster-whisper-small"
     else
       echo "    从镜像下载（HF_ENDPOINT=$HF_ENDPOINT）…"
-      bash "$DIR/setup_whisper.sh" || echo "    ⚠ Whisper 下载失败，可稍后重试: ./setup_whisper.sh"
+      PYTHON_BIN="$PYTHON_BIN" bash "$DIR/setup_whisper.sh" || echo "    ⚠ Whisper 下载失败，可稍后重试: ./setup_whisper.sh"
     fi
   fi
 
   if [[ ${#OPTIONAL_MISSING[@]} -gt 0 ]]; then
-    echo ""
-    if [[ -t 0 ]]; then
-      read -r -p "是否安装 Playwright Chromium（视频号发现）？[y/N] " pans
-      if [[ "$pans" =~ ^[Yy]$ ]]; then
-        bash "$DIR/setup_playwright.sh" || echo "    ⚠ Playwright 安装失败，可稍后: ./setup_playwright.sh"
-      else
-        echo "    已跳过 Playwright。"
+    # 仅当缺失项包含 Playwright 时询问
+    local need_pw=0
+    local item
+    for item in "${OPTIONAL_MISSING[@]+"${OPTIONAL_MISSING[@]}"}"; do
+      if [[ "$item" == *"Playwright"* ]]; then
+        need_pw=1
       fi
-    else
-      echo "    非交互环境，已跳过 Playwright。需要时运行: ./setup_playwright.sh"
+    done
+    if [[ "$need_pw" -eq 1 ]]; then
+      echo ""
+      if [[ -t 0 ]]; then
+        read -r -p "是否安装 Playwright Chromium（视频号发现）？[y/N] " pans
+        if [[ "$pans" =~ ^[Yy]$ ]]; then
+          PYTHON_BIN="$PYTHON_BIN" bash "$DIR/setup_playwright.sh" || echo "    ⚠ Playwright 安装失败，可稍后: ./setup_playwright.sh"
+        else
+          echo "    已跳过 Playwright。"
+        fi
+      else
+        echo "    非交互环境，已跳过 Playwright。需要时运行: ./setup_playwright.sh"
+      fi
     fi
   fi
 
@@ -261,6 +288,7 @@ do_install() {
   date +%s >"$DIR/output/.capabilities_installed_at"
   echo ""
   echo "安装流程结束。可双击「打开小红书提取工具.command」启动。"
+  echo "（依赖位于 .venv，与系统/uv Python 隔离。）"
 }
 
 # ---------- main ----------
@@ -288,26 +316,25 @@ if [[ "$MODE" == "manual" ]]; then
     exit 0
   fi
   do_install
+  resolve_python_bin
   scan_capabilities
   echo ""
   print_report
   exit 0
 fi
 
-# auto 模式：核心齐全则完全静默，不触发提示
+# auto 模式：核心齐全则完全静默
 if [[ ${#MISSING[@]} -eq 0 ]]; then
   exit 0
 fi
 
 echo ">>> 检测到核心能力缺失（共 ${#MISSING[@]} 项）。"
 echo "    建议先双击「检测并安装能力.command」查看清单；或在此直接安装。"
+echo "    安装将写入项目 .venv，可规避「externally-managed-environment / uv」报错。"
 echo ""
 for item in "${MISSING[@]+"${MISSING[@]}"}"; do
   echo "  • $item"
 done
-echo ""
-echo "说明：核心/转写/OCR/小红书采集库同意后自动安装（需联网时约 5–15 分钟）。"
-echo "      TokenHub API 请在网页填写；Playwright 可选。"
 echo ""
 
 if [[ ! -t 0 ]]; then

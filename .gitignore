@@ -9,6 +9,7 @@ build/
 
 # Runtime output
 output/
+.venv/
 
 # macOS
 .DS_Store
