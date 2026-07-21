@@ -447,9 +447,14 @@ def _diagnose_chrome_launch(port: int) -> str:
                     hints.append(f"启动日志：{tail[-300:]}")
             except OSError:
                 pass
-        hints.append("macOS：日常 Chrome 开着时调试端口常起不来，请先菜单栏「Chrome → 完全退出」再点「登录小红书」。")
+        hints.append("macOS：请先「Chrome → 完全退出」，再点「登录小红书」（会新开独立调试窗口，不影响日常书签）。")
         hints.append("或终端手动启动：")
-        hints.append(f'  open -n -a "Google Chrome" --args --remote-debugging-port={port} --user-data-dir="{profile}" --remote-allow-origins=*')
+        hints.append(
+            f'  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"'
+            f' --remote-debugging-port={port}'
+            f' --user-data-dir="{profile}"'
+            f' --remote-allow-origins=*'
+        )
     except Exception as exc:  # noqa: BLE001
         hints.append(f"诊断失败：{exc}")
     return " | ".join(hints)
@@ -464,7 +469,13 @@ def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
     login_port = int(port or DEFAULT_CDP_PORT)
     now = time.time()
     last = _login_flow_started_at.get(login_port, 0.0)
-    if now - last < _LOGIN_FLOW_COOLDOWN:
+    # 冷却仅在调试端口仍可用时生效；9222 已挂掉时必须允许重新启动 Chrome
+    try:
+        from chrome_launcher import is_port_open as _cdp_port_open
+    except Exception:  # noqa: BLE001
+        _cdp_port_open = None
+    port_alive = bool(_cdp_port_open(login_port)) if _cdp_port_open else False
+    if now - last < _LOGIN_FLOW_COOLDOWN and port_alive:
         remain = int(_LOGIN_FLOW_COOLDOWN - (now - last))
         return {
             "started": False,
@@ -472,6 +483,8 @@ def trigger_login_flow(*, port: int | None = None) -> dict[str, Any]:
             "port": login_port,
             "message": f"小红书主页已打开，请在 Chrome 窗口完成登录（{remain}s 内不会重复刷新）。",
         }
+    if now - last < _LOGIN_FLOW_COOLDOWN and not port_alive:
+        _login_flow_started_at.pop(login_port, None)
 
     _forget_login_status(None, login_port)
     publisher = None

@@ -131,6 +131,62 @@ def _macos_chrome_app_path(chrome_binary: str) -> str:
     return "/Applications/Google Chrome.app"
 
 
+def _profile_in_use(user_data_dir: str) -> bool:
+    """Return True if a Chrome process still holds this user-data-dir."""
+    needle = f"--user-data-dir={user_data_dir}"
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", needle],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def _clear_stale_profile_locks(user_data_dir: str) -> None:
+    """Remove leftover Singleton* files that block a new CDP Chrome instance."""
+    if _profile_in_use(user_data_dir):
+        return
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie", "Lock"):
+        path = os.path.join(user_data_dir, name)
+        try:
+            if os.path.islink(path) or os.path.isfile(path):
+                os.unlink(path)
+                print(f"[chrome_launcher] Cleared stale profile lock: {name}")
+        except OSError:
+            pass
+
+
+def _kill_processes_for_profile(user_data_dir: str) -> None:
+    """Best-effort kill of Chrome processes using this dedicated profile."""
+    needle = f"--user-data-dir={user_data_dir}"
+    try:
+        if sys.platform == "win32":
+            return
+        subprocess.run(
+            ["pkill", "-f", needle],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _wait_for_port(port: int, timeout: float, proc: subprocess.Popen | None, *, ignore_quick_exit: bool) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_port_open(port):
+            return True
+        if proc is not None and not ignore_quick_exit and proc.poll() is not None:
+            return False
+        time.sleep(0.4)
+    return is_port_open(port)
+
+
 def launch_chrome(
     port: int = CDP_PORT,
     headless: bool = False,
@@ -173,78 +229,88 @@ def launch_chrome(
     if headless:
         chrome_args.append("--headless=new")
 
-    # macOS: 日常 Chrome 已打开时，直接 Popen 二进制会被合并进旧进程并忽略调试参数。
-    # 用 `open -n -a xxx.app --args` 强制新实例，才能真正打开 9222。
-    use_open_n = sys.platform == "darwin" and not headless
-    if use_open_n:
+    # 独立 user-data-dir 时优先直接启动二进制（本机验证最稳）。
+    # macOS 再备选 open -n，防止个别环境把二次启动合并进日常 Chrome。
+    strategies: list[tuple[str, list[str], bool]] = [
+        ("binary", [chrome_path, *chrome_args], False),
+    ]
+    if sys.platform == "darwin" and not headless:
         app_path = _macos_chrome_app_path(chrome_path)
-        cmd = ["open", "-n", "-a", app_path, "--args", *chrome_args]
-        launch_label = f"open -n -a {app_path}"
-    else:
-        cmd = [chrome_path, *chrome_args]
-        launch_label = chrome_path
+        strategies.append(
+            ("open -n", ["open", "-n", "-a", app_path, "--args", *chrome_args], True)
+        )
 
     mode_label = "headless" if headless else "headed"
     account_label = account or "default"
-    print(f"[chrome_launcher] Launching Chrome ({mode_label}, account: {account_label})...")
-    print(f"  launch     : {launch_label}")
-    print(f"  executable : {chrome_path}")
-    print(f"  profile dir: {user_data_dir}")
-    print(f"  debug port : {port}")
-
     os.makedirs(user_data_dir, exist_ok=True)
+    _clear_stale_profile_locks(user_data_dir)
     log_path = os.path.join(user_data_dir, "cdp_launch.log")
-    log_fp = open(log_path, "ab", buffering=0)
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=log_fp,
-            stderr=log_fp,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        log_fp.close()
-        raise RuntimeError(f"无法执行 Chrome：{exc}") from exc
-    _chrome_process = proc
 
-    deadline = time.time() + STARTUP_TIMEOUT
-    while time.time() < deadline:
+    last_proc: subprocess.Popen | None = None
+    for strategy_name, cmd, ignore_quick_exit in strategies:
         if is_port_open(port):
-            print(f"[chrome_launcher] Chrome is ready on port {port}.")
+            return None
+
+        print(f"[chrome_launcher] Launching Chrome ({mode_label}, account: {account_label})...")
+        print(f"  strategy   : {strategy_name}")
+        print(f"  executable : {chrome_path}")
+        print(f"  profile dir: {user_data_dir}")
+        print(f"  debug port : {port}")
+
+        log_fp = open(log_path, "ab", buffering=0)
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fp,
+                stderr=log_fp,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            log_fp.close()
+            print(f"[chrome_launcher] strategy {strategy_name} failed to spawn: {exc}", file=sys.stderr)
+            continue
+
+        _chrome_process = proc
+        last_proc = proc
+        per_try_timeout = max(12.0, STARTUP_TIMEOUT / max(1, len(strategies)))
+        if _wait_for_port(port, per_try_timeout, proc, ignore_quick_exit=ignore_quick_exit):
+            print(f"[chrome_launcher] Chrome is ready on port {port} via {strategy_name}.")
             try:
                 log_fp.close()
             except Exception:
                 pass
             return proc
-        # open -n 会立刻退出，不能据此判断 Chrome 崩溃
-        if not use_open_n and proc.poll() is not None:
-            break
-        time.sleep(0.5)
 
-    exit_code = proc.poll()
+        try:
+            log_fp.close()
+        except Exception:
+            pass
+        print(
+            f"[chrome_launcher] strategy {strategy_name} did not open port {port}; trying next…",
+            file=sys.stderr,
+        )
+        _kill_processes_for_profile(user_data_dir)
+        _clear_stale_profile_locks(user_data_dir)
+        time.sleep(0.8)
+
     hint = ""
     try:
-        log_fp.flush()
-        log_fp.close()
         with open(log_path, "rb") as fh:
             tail = fh.read()[-2000:].decode("utf-8", errors="replace").strip()
         if tail:
             hint = f" Chrome 日志尾部：{tail[-500:]}"
     except Exception:
         pass
-
-    if use_open_n:
-        hint += (
-            " 若日常 Chrome 正在使用，请先菜单栏「Chrome → 完全退出」后再试；"
-            "本工具需要独立调试实例才能占用 9222 端口。"
-        )
-
+    hint += (
+        " 请先菜单栏「Chrome → 完全退出」后重试；"
+        "本工具使用独立配置目录启动调试实例（不影响日常书签）。"
+    )
     print(
         f"[chrome_launcher] WARNING: Chrome port {port} not ready "
-        f"after {STARTUP_TIMEOUT}s (exit={exit_code}).{hint}",
+        f"after all strategies.{hint}",
         file=sys.stderr,
     )
-    return proc
+    return last_proc
 
 
 def kill_chrome(port: int = CDP_PORT):
@@ -317,6 +383,26 @@ def kill_chrome(port: int = CDP_PORT):
     while time.time() < deadline:
         if not is_port_open(port):
             return
+        time.sleep(0.3)
+
+    # Strategy 4: macOS/Linux — kill whatever still listens on the debug port
+    if sys.platform != "win32" and is_port_open(port):
+        try:
+            result = subprocess.run(
+                ["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            for pid in result.stdout.split():
+                pid = pid.strip()
+                if not pid:
+                    continue
+                subprocess.run(["kill", "-9", pid], capture_output=True, timeout=3, check=False)
+                print(f"[chrome_launcher] Killed listener pid {pid} on port {port}.")
+        except Exception:
+            pass
         time.sleep(0.5)
 
     if is_port_open(port):
@@ -369,12 +455,16 @@ def ensure_chrome(
     if is_port_open(port):
         return True
     try:
+        profile = get_user_data_dir(account)
+        _clear_stale_profile_locks(profile)
         launch_chrome(port, headless=headless, account=account)
         if is_port_open(port):
             return True
-        # One retry after cleaning a stuck instance on this port
+        # One retry after cleaning a stuck instance on this port / profile
         print(f"[chrome_launcher] Port {port} still closed; retrying after restart…")
         kill_chrome(port)
+        _kill_processes_for_profile(profile)
+        _clear_stale_profile_locks(profile)
         time.sleep(1.2)
         launch_chrome(port, headless=headless, account=account)
         return is_port_open(port)
