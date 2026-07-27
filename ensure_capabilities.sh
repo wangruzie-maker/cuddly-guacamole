@@ -33,7 +33,13 @@ if ! _pick_system_python >/dev/null 2>&1 && ! _venv_is_usable; then
   fi
 fi
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
+if [[ -d "$DIR/vendor/ms-playwright" ]]; then
+  export PLAYWRIGHT_BROWSERS_PATH="$DIR/vendor/ms-playwright"
+else
+  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
+fi
+OFFLINE_BUNDLE=0
+[[ -f "$DIR/vendor/.offline_bundle" ]] && OFFLINE_BUNDLE=1
 
 MISSING=()
 OPTIONAL_MISSING=()
@@ -260,19 +266,29 @@ do_install() {
   export PYTHON_BIN
   echo "    安装目标: $PYTHON_BIN"
 
+  local pip_extra=()
+  if [[ "$OFFLINE_BUNDLE" -eq 1 && -d "$DIR/vendor/wheels" ]]; then
+    pip_extra=(--no-index --find-links "$DIR/vendor/wheels")
+    echo "    模式: 离线（仅本地 wheels）"
+  fi
+
   echo ""
-  echo ">>> 安装核心 Python 依赖到 .venv…"
-  if ! "$PYTHON_BIN" -m pip install -r requirements.txt; then
+  echo ">>> 安装核心 Python 依赖…"
+  if ! "$PYTHON_BIN" -m pip install -r requirements.txt "${pip_extra[@]}"; then
     echo "    完整 requirements 失败，尝试精简核心包…"
     "$PYTHON_BIN" -m pip install "fastapi>=0.110" "uvicorn[standard]>=0.27" requests pydantic \
-      "faster-whisper>=1.0" openpyxl Pillow zhconv jieba websockets || {
-      echo "    ❌ 核心依赖安装失败。请检查网络，或改用 Python 3.12：brew install python@3.12"
+      "faster-whisper>=1.0" openpyxl Pillow zhconv jieba websockets "${pip_extra[@]}" || {
+      if [[ "$OFFLINE_BUNDLE" -eq 1 ]]; then
+        echo "    ❌ 离线依赖安装失败。请勿删除 vendor/wheels，或改用完整离线包。"
+      else
+        echo "    ❌ 核心依赖安装失败。请检查网络，或改用 Python 3.12：brew install python@3.12"
+      fi
       return 1
     }
   fi
 
   if [[ -f "$DIR/vendor/redbook-skills/requirements.txt" ]]; then
-    "$PYTHON_BIN" -m pip install -r "$DIR/vendor/redbook-skills/requirements.txt" -q || true
+    "$PYTHON_BIN" -m pip install -r "$DIR/vendor/redbook-skills/requirements.txt" -q "${pip_extra[@]}" || true
   fi
 
   echo ""
@@ -281,7 +297,7 @@ do_install() {
     echo "    跳过：当前为 Python ≥3.13，rapidocr-onnxruntime 无可用轮子。"
     echo "    解决：安装 python@3.12 后执行 rm -rf .venv && ./ensure_capabilities.sh --manual"
   elif [[ -f "$DIR/requirements-ocr.txt" ]]; then
-    if "$PYTHON_BIN" -m pip install -r "$DIR/requirements-ocr.txt"; then
+    if "$PYTHON_BIN" -m pip install -r "$DIR/requirements-ocr.txt" "${pip_extra[@]}"; then
       echo "    OCR 已安装。"
     else
       echo "    ⚠ OCR 安装失败，图片 OCR 暂不可用；其它功能不受影响。"
@@ -297,6 +313,8 @@ do_install() {
     echo ">>> 准备 Whisper 模型…"
     if [[ -d "$DIR/vendor/faster-whisper-small" ]] && find "$DIR/vendor/faster-whisper-small" -name model.bin 2>/dev/null | grep -q .; then
       echo "    已使用压缩包内置模型：vendor/faster-whisper-small"
+    elif [[ "$OFFLINE_BUNDLE" -eq 1 ]]; then
+      echo "    ⚠ 离线包缺少 Whisper 模型文件，转写不可用。"
     else
       echo "    从镜像下载（HF_ENDPOINT=$HF_ENDPOINT）…"
       PYTHON_BIN="$PYTHON_BIN" bash "$DIR/setup_whisper.sh" || echo "    ⚠ Whisper 下载失败，可稍后重试: ./setup_whisper.sh"
@@ -315,7 +333,13 @@ do_install() {
     done
     if [[ "$need_pw" -eq 1 ]]; then
       echo ""
-      if [[ -t 0 ]]; then
+      if [[ "$OFFLINE_BUNDLE" -eq 1 ]]; then
+        if [[ -d "$DIR/vendor/ms-playwright" ]]; then
+          echo "    离线包已内置 Playwright 浏览器缓存。"
+        else
+          echo "    离线包未内置 Playwright；视频号发现可能不可用。"
+        fi
+      elif [[ -t 0 ]]; then
         read -r -p "是否安装 Playwright Chromium（视频号发现）？[y/N] " pans
         if [[ "$pans" =~ ^[Yy]$ ]]; then
           PYTHON_BIN="$PYTHON_BIN" bash "$DIR/setup_playwright.sh" || echo "    ⚠ Playwright 安装失败，可稍后: ./setup_playwright.sh"
@@ -332,7 +356,11 @@ do_install() {
   date +%s >"$DIR/output/.capabilities_installed_at"
   echo ""
   echo "安装流程结束。可双击「打开小红书提取工具.command」启动。"
-  echo "（依赖位于 .venv，与系统/uv Python 隔离。）"
+  if [[ "$OFFLINE_BUNDLE" -eq 1 ]]; then
+    echo "（离线即用包：依赖位于 vendor/python，无需联网。）"
+  else
+    echo "（依赖位于 .venv，与系统/uv Python 隔离。）"
+  fi
 }
 
 prompt_yes_default() {
@@ -353,6 +381,12 @@ prompt_yes_default() {
 }
 
 # ---------- main ----------
+# 离线即用包：auto 模式静默确保运行时后退出，不弹安装
+if [[ "$OFFLINE_BUNDLE" -eq 1 && "$MODE" == "auto" ]]; then
+  ensure_offline_runtime >/dev/null 2>&1 || ensure_offline_runtime || true
+  exit 0
+fi
+
 scan_capabilities
 
 if [[ "$MODE" == "manual" ]]; then

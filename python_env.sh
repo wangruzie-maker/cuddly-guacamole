@@ -55,7 +55,42 @@ _venv_is_usable() {
   _python_is_usable "$py"
 }
 
+_bundled_python() {
+  # 离线包内置便携 Python（按本机架构选择）
+  local arch dest
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  case "$arch" in
+    arm64|aarch64) dest="$DIR/vendor/python/arm64/bin/python3" ;;
+    x86_64|amd64) dest="$DIR/vendor/python/x86_64/bin/python3" ;;
+    *) dest="" ;;
+  esac
+  if [[ -n "$dest" && -x "$dest" ]] && _python_is_usable "$dest"; then
+    echo "$dest"
+    return 0
+  fi
+  # 兜底：另一架构目录（Rosetta 等）
+  for dest in \
+    "$DIR/vendor/python/arm64/bin/python3" \
+    "$DIR/vendor/python/x86_64/bin/python3"
+  do
+    if [[ -x "$dest" ]] && _python_is_usable "$dest"; then
+      echo "$dest"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_is_offline_bundle() {
+  [[ -f "$DIR/vendor/.offline_bundle" ]]
+}
+
 _candidate_pythons() {
+  # 离线包：优先用内置 Python，避免同事机系统 Python 差异
+  local bundled
+  if bundled="$(_bundled_python)"; then
+    echo "$bundled"
+  fi
   # 显式路径优先（避开 ~/.local 里 uv 软链抢 PATH，防止生成 /install 坏 venv）
   local paths=(
     /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
@@ -144,8 +179,48 @@ _create_venv_with() {
   return 0
 }
 
+ensure_offline_runtime() {
+  # 离线包：直接使用 vendor/python（已预装依赖），必要时从 vendor/wheels 本地补齐
+  local py wheels
+  py="$(_bundled_python)" || return 1
+  PYTHON_BIN="$py"
+  export PYTHON_BIN
+  if "$PYTHON_BIN" -c "import fastapi,uvicorn" 2>/dev/null; then
+    return 0
+  fi
+  wheels="$DIR/vendor/wheels"
+  if [[ ! -d "$wheels" ]]; then
+    echo "    ❌ 离线包依赖不完整（缺 vendor/wheels）"
+    return 1
+  fi
+  echo ">>> 离线补齐依赖（仅用本地 wheels，不联网）…"
+  "$PYTHON_BIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  "$PYTHON_BIN" -m pip install -U pip setuptools wheel -q --no-warn-script-location 2>/dev/null || true
+  "$PYTHON_BIN" -m pip install -r "$DIR/requirements.txt" \
+    --no-index --find-links "$wheels" --no-warn-script-location || return 1
+  if [[ -f "$DIR/requirements-ocr.txt" ]] && ! _python_is_too_new_for_ocr "$PYTHON_BIN"; then
+    "$PYTHON_BIN" -m pip install -r "$DIR/requirements-ocr.txt" \
+      --no-index --find-links "$wheels" --no-warn-script-location || true
+  fi
+  if [[ -f "$DIR/vendor/redbook-skills/requirements.txt" ]]; then
+    "$PYTHON_BIN" -m pip install -r "$DIR/vendor/redbook-skills/requirements.txt" \
+      --no-index --find-links "$wheels" --no-warn-script-location || true
+  fi
+  "$PYTHON_BIN" -c "import fastapi,uvicorn" 2>/dev/null
+}
+
 ensure_project_venv() {
   local sys_py venv_py cand tried="" list ver
+
+  # 离线即用包：不创建 .venv，直接用内置 Python
+  if _is_offline_bundle; then
+    if ensure_offline_runtime; then
+      echo "    离线运行时就绪: $PYTHON_BIN"
+      return 0
+    fi
+    echo "    ❌ 离线运行时不可用"
+    return 1
+  fi
 
   # 已有坏掉的 .venv（/install / encodings 缺失）→ 删掉重建
   if _venv_python >/dev/null 2>&1; then
@@ -206,6 +281,13 @@ resolve_python_bin() {
   if [[ -n "${PYTHON_BIN:-}" && -x "${PYTHON_BIN}" ]] && _python_is_usable "${PYTHON_BIN}"; then
     return 0
   fi
+  # 离线包优先内置 Python（即使没有 .venv）
+  if _is_offline_bundle; then
+    if PYTHON_BIN="$(_bundled_python)"; then
+      export PYTHON_BIN
+      return 0
+    fi
+  fi
   if _venv_is_usable; then
     PYTHON_BIN="$(_venv_python)"
     export PYTHON_BIN
@@ -214,6 +296,10 @@ resolve_python_bin() {
   # 坏 venv 清掉，避免后续继续用
   if _venv_python >/dev/null 2>&1; then
     rm -rf "$DIR/.venv"
+  fi
+  if PYTHON_BIN="$(_bundled_python)"; then
+    export PYTHON_BIN
+    return 0
   fi
   if PYTHON_BIN="$(_pick_system_python)"; then
     export PYTHON_BIN

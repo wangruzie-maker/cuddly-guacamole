@@ -8,7 +8,7 @@ cd "$DIR"
 source "$DIR/python_env.sh"
 
 PORT=8765
-EXPECTED_VERSION="1.41.3"
+EXPECTED_VERSION="1.42.0"
 BASE_URL="http://127.0.0.1:${PORT}"
 URL="${BASE_URL}?v=${EXPECTED_VERSION}"
 PID_FILE="$DIR/output/server.pid"
@@ -20,7 +20,12 @@ resolve_python_bin
 # 若尚无 .venv 但系统 Python 可用，先沿用；安装能力时会创建 .venv
 export PYTHON_BIN
 
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
+# 离线包优先用内置 Playwright 浏览器；否则回落到本机缓存
+if [[ -d "$DIR/vendor/ms-playwright" ]]; then
+  export PLAYWRIGHT_BROWSERS_PATH="$DIR/vendor/ms-playwright"
+else
+  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
+fi
 
 server_mode() {
   curl -sf "${BASE_URL}/api/health" 2>/dev/null | "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin).get('mode',''))" 2>/dev/null || true
@@ -39,6 +44,15 @@ routes_ok() {
 }
 
 ensure_deps() {
+  # 离线即用包：静默确保内置运行时，不弹安装、不联网
+  if [[ -f "$DIR/vendor/.offline_bundle" ]]; then
+    resolve_python_bin
+    ensure_offline_runtime || {
+      echo "离线运行时启动失败。请确认未删掉 vendor/python 与 vendor/wheels。"
+      exit 1
+    }
+    return 0
+  fi
   # 自动模式：能力齐全则静默；仅核心缺失时才询问安装（装进 .venv）
   if [[ -f "$DIR/ensure_capabilities.sh" ]]; then
     bash "$DIR/ensure_capabilities.sh" --auto || true

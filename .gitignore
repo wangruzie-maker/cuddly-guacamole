@@ -29,6 +29,10 @@ output/
 *.swp
 *.swo
 
-# Whisper models（体积大，仅完整压缩包携带；勿提交 Git）
+# Whisper models（体积大，仅完整/离线压缩包携带；勿提交 Git）
 whisper_models/
 vendor/faster-whisper-*/
+vendor/python/
+vendor/wheels/
+vendor/ms-playwright/
+vendor/.offline_bundle

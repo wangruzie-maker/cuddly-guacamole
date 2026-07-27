@@ -2,19 +2,21 @@
 
 本地运行的小红书 / 视频号工具，围绕「获取选题依据 → 选择性转录 → 语料分析 → 得出创作选题 → 发布追踪」组织操作。
 
-## 3 步上手（通用 Mac）
+## 推荐：离线即用版（同事首选）
+
+解压 GitHub Release 里的 **`社媒选题与创作工具-离线即用版-vX.Y.Z.zip`** 后：
+
+1. 右键 **`打开小红书提取工具.command`** → 打开
+2. 浏览器打开即可用（已内置 Python / 依赖 / Whisper / 采集库）
+
+本机仍需 **Google Chrome**。AI Key 找负责人要，在网页填写。  
+打离线包：`./pack_offline.sh`（体积约 800MB+，请用 Release 分发，勿提交进 Git）。
+
+## 开发机 / 非离线包上手
 
 1. 没有 Python 3.12 → 双击 **`准备Python环境.command`**（官方安装包）  
 2. 双击 **`检测并安装能力.command`**，同意装依赖到项目 `.venv`  
 3. 双击 **`打开小红书提取工具.command`**
-
-```bash
-./bootstrap_python.sh          # 可选：命令行准备 Python
-./ensure_capabilities.sh --manual
-./open_app.sh
-```
-
-也可 `./pack_full.sh` 打完整包发给同事（含 Whisper + redbook-skills）。
 
 1. **登录小红书** — 点击顶栏「登录小红书」，在 Chrome 扫码
 2. **获取依据** — 设置采集深度及互动阈值，按数据筛选参考内容
